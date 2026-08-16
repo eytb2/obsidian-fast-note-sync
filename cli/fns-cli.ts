@@ -302,12 +302,12 @@ function assemble(cfg: CliConfig, host: HostEvents = {}, hashCache?: HashCache):
   });
   // 环形依赖在此收口：transport 事件回调 → v3 客户端分发。
   // ClientInfo 是服务端版本推送（升级检测），单独拦给宿主，不进 v3 协议分发。
-  events.onEnvelope = (action: string, env: WSEnvelope) => {
+  events.onEnvelope = (action: string, env: WSEnvelope): boolean => {
     if (action === "ClientInfo") {
       host.onVersionInfo?.(env);
-      return;
+      return true;
     }
-    client.handleAction(action, env);
+    return client.handleAction(action, env);
   };
 
   const a: Assembled = {
