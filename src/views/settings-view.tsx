@@ -271,7 +271,6 @@ const SupportList = ({ plugin }: { plugin: FastSync }) => {
 
   const getSupportLink = () => {
     const locale = getLocale();
-    const source = plugin.settings.updateSource || "github";
 
     const fileNameMap: Record<string, string> = {
       "zh-cn": "Support.zh-CN.md",
@@ -281,9 +280,9 @@ const SupportList = ({ plugin }: { plugin: FastSync }) => {
     };
     const fileName = fileNameMap[locale] || "Support.en.md";
 
-    const baseUrl = source === "cnb"
-      ? "https://cnb.cool/haierkeys/fast-note-sync-service/-/blob/master/docs/"
-      : "https://github.com/haierkeys/fast-note-sync-service/blob/master/docs/";
+    // 支持文档指向自建 GitHub 仓库（eytb2）
+    // Support docs live in the self-hosted GitHub repo (eytb2)
+    const baseUrl = "https://github.com/eytb2/fast-note-sync-service/blob/master/docs/";
 
     return baseUrl + fileName;
   };

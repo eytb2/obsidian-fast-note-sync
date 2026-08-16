@@ -89,6 +89,9 @@ export class WebSocketManager {
   // Lightweight event bus for awaiting server BatchAck during batch send
   private _listeners: Map<string, Set<(...args: unknown[]) => void>> = new Map();
 
+  // v3 分发钩子（V3Controller.start 注入，stop 置空）：V3* 动作与裸错误帧的消费入口
+  public v3Dispatch: ((action: string, data: unknown) => boolean) | null = null;
+
   /**
    * 订阅事件 / Subscribe to an event
    */
@@ -296,6 +299,12 @@ export class WebSocketManager {
       SyncLogManager.getInstance().logReceivedMessage(msgAction, data, this.plugin.currentSyncType);
     }
 
+    // v3 分发钩子：V3* 动作与裸错误帧（action=""，二进制分块错误路径）交给 V3SyncClient；
+    // 返回 true 表示已消费，不再走旧协议分发。v2 引擎运行时钩子为 null，行为不变。
+    if (this.v3Dispatch && this.v3Dispatch(msgAction, data)) {
+      return;
+    }
+
     if (msgAction === WSAction.ClientReceiveAuth) {
       if (data.code <= 0 || data.code >= 300) {
         showSyncNotice(formatAuthorizationError(data), 6000);
@@ -495,6 +504,13 @@ export class WebSocketManager {
 
     if (handleId !== this.currentStartHandleId) {
       dump(`Service start handle cancelled, id: ${handleId}`);
+      return;
+    }
+
+    // v3 引擎：启动同步由 V3Controller 的 statusListener 触发（引擎整轮对账），
+    // 跳过 v2 的启动同步与哈希表等待
+    if (this.plugin.v3Controller) {
+      dump(`[v3] StartHandle skipped — engine rounds are driven by V3Controller`);
       return;
     }
 

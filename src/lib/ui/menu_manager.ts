@@ -1,6 +1,6 @@
 import { Menu, MenuItem, setIcon, Platform, WorkspaceLeaf, normalizePath, Notice } from 'obsidian';
 
-import { startupSync, startupFullSync, resetSettingSyncTime, rebuildAllHashes, clearAllHashes, cancelSync } from '../sync/operator';
+import { resetSettingSyncTime, rebuildAllHashes, clearAllHashes, cancelSync } from '../sync/operator';
 import { AppWithInternal, MenuItemWithDom, MenuWithHide, MenuItemWithInternal } from "../utils/types";
 import { NoteHistoryModal } from '../../views/note-history/history-modal';
 import { RecycleBinModal } from '../../views/recycle-bin-modal';
@@ -158,7 +158,8 @@ export class MenuManager {
     this.plugin.addCommand({
       id: "start-full-sync",
       name: $("ui.menu.full_sync"),
-      callback: () => { void startupFullSync(this.plugin); },
+      // v3：整轮对账引擎（full/default 同义，快照模型无增量/全量之分）；v2 走旧全量
+      callback: () => { this.plugin.triggerSync("full"); },
     });
 
     this.plugin.addCommand({
@@ -510,7 +511,7 @@ export class MenuManager {
           } else if (isBlockedByFull) {
             showSyncNotice($("ui.menu.cancel_full_first"));
           } else {
-            void startupSync(this.plugin);
+            this.plugin.triggerSync("default");
           }
         });
 
@@ -542,7 +543,7 @@ export class MenuManager {
           } else if (isBlockedByIncremental) {
             showSyncNotice($("ui.menu.cancel_default_first"));
           } else {
-            void startupFullSync(this.plugin);
+            this.plugin.triggerSync("full");
           }
         });
 

@@ -38,3 +38,6 @@ folderSnapshot.json
 conflict-notes/*.remote.md
 conflict-notes/*.base.md
 syncHashMap.json
+
+# CLI build output
+dist/

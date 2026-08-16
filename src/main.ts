@@ -22,7 +22,8 @@ import { EventManager } from "./lib/utils/events_manager";
 import { WebSocketManager } from "./lib/sync/websocket_manager";
 import { MenuManager } from "./lib/ui/menu_manager";
 import { LockManager } from "./lib/sync/lock_manager";
-import { handleSync, cancelSync } from "./lib/sync/operator";
+import { handleSync, cancelSync, startupSync, startupFullSync } from "./lib/sync/operator";
+import { V3Controller } from "./lib/sync/v3/v3_controller";
 import { cleanupConfigReloadTimer } from "./lib/sync/operator_config";
 import { HttpApiService } from "./lib/api/http_api_service";
 import { SyncState } from "./lib/sync/sync_state";
@@ -53,6 +54,7 @@ export default class FastSync extends Plugin {
   settings: PluginSettings                        // 插件设置
   api: HttpApiService                             // HTTP API 服务
   websocket: WebSocketManager                     // WebSocket 客户端
+  v3Controller: V3Controller | null = null        // v3 快照同步引擎（syncEngineVersion==="v3" 时装配）
   versionManager: VersionManager                  // 版本提示与自动升级管理器
   configManager: ConfigManager                    // 配置管理器
   lockManager: LockManager                        // 锁管理器
@@ -612,10 +614,15 @@ export default class FastSync extends Plugin {
         }
       }
 
-      if (this.fileHashManager.isReady()) {
+      if (this.settings.syncEngineVersion === "v3" || this.fileHashManager.isReady()) {
+        // v3 不依赖旧哈希表（事件只做信号），哈希管理器未就绪也照常注册
         this.eventManager = new EventManager(this)
         void this.eventManager.registerEvents()
       }
+
+      // 6.5 装配 v3 引擎（须在 EventManager 之后：事件回调引用 v3Controller；
+      // 须在 reloadServices 之前：WS 注册后 statusListener 才能收到连接信号）
+      void this.ensureV3Controller()
 
       // 7. 刷新运行时设置 (包含网络探测，不阻塞主流程)
       void this.reloadServices()
@@ -637,6 +644,8 @@ export default class FastSync extends Plugin {
   }
 
   onunload() {
+    // 停止 v3 引擎（中断在途轮次、摘除 WS 分发钩子）
+    this.stopV3Controller()
     // 取消当前正在进行的同步，重置运行时状态
     cancelSync(this)
     abortAllFileOperations()
@@ -710,7 +719,8 @@ export default class FastSync extends Plugin {
     // 迁移：如果 data.json 中包含插件目录规则，则移动到 LocalStorage
     if (data && data.syncExcludeFolders) {
       const rawRules = parseRules(data.syncExcludeFolders);
-      const toMove = rawRules.filter(r => isPathMatch(r.pattern, pluginSelfDir));
+      // 注意参数序：isPathMatch(path, pattern)——判断「规则是否命中插件目录」
+      const toMove = rawRules.filter(r => isPathMatch(pluginSelfDir, r.pattern));
       if (toMove.length > 0) {
         toMove.forEach(rule => {
           if (!internalExcludes.some(ir => ir.pattern === rule.pattern)) {
@@ -882,6 +892,35 @@ export default class FastSync extends Plugin {
   async saveAndReloadServices(setItem: string = "") {
     await this.saveSettings()
     this.reloadServices(true, setItem)
+  }
+
+  // ─── v3 引擎装配（设计文档 §3：宿主只做信号与持久化）────────────────────────
+
+  /** 进入 v3 模式时装配并启动引擎（幂等；v2 模式下为空操作） */
+  async ensureV3Controller(): Promise<void> {
+    if (this.settings.syncEngineVersion !== "v3") return;
+    if (this.v3Controller) return;
+    this.v3Controller = new V3Controller(this);
+    await this.v3Controller.start();
+    dump("[v3] controller started");
+  }
+
+  /** 退出 v3 模式 / 卸载时停止引擎（幂等） */
+  stopV3Controller(): void {
+    if (!this.v3Controller) return;
+    this.v3Controller.stop();
+    this.v3Controller = null;
+    dump("[v3] controller stopped");
+  }
+
+  /** 手动同步统一入口：v3 走引擎整轮对账，v2 走旧 handleSync */
+  triggerSync(kind: "default" | "full" = "default"): void {
+    if (this.v3Controller) {
+      void this.v3Controller.runNow();
+      return;
+    }
+    if (kind === "full") void startupFullSync(this);
+    else void startupSync(this);
   }
 
   reloadServices(forceRegister: boolean = true, setItem: string = "") {

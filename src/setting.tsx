@@ -79,7 +79,6 @@ export interface PluginSettings {
    * Whether to show share icon (native file explorer & Notebook Navigator) */
   showShareIcon: boolean
   /** 插件更新源 */
-  updateSource: "github" | "cnb"
   /** 手机端状态点位置 */
   mobileStatusDotPosition: "hidden" | "top-right" | "top-left" | "bottom-right" | "bottom-left" | "menu-bar"
   /** 是否显示更新红点提示（侧边栏及图标） */
@@ -116,6 +115,10 @@ export interface PluginSettings {
   hashSyncLimit: number
   /** 已提示过大文件跳过同步的 "path|size" 记录，避免同一文件每轮同步重复弹通知 */
   largeFileNoticeShown: string[]
+  /** 同步引擎：v3 = git 式快照对账（git-sync-redesign）；v2 = 旧事件驱动逐文件协议 */
+  syncEngineVersion: "v2" | "v3"
+  /** v3 冲突解决策略（设计文档 §2.1：服务器只报告，客户端决定） */
+  v3ConflictStrategy: "server-wins" | "local-wins" | "newest-wins" | "copy"
 }
 
 /**
@@ -159,7 +162,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   autoPauseMinimized: false,
   sharedPaths: [],
   showShareIcon: true,
-  updateSource: "github",
   mobileStatusDotPosition: "menu-bar",
   showUpgradeBadge: true,
   concurrencyControlEnabled: true,
@@ -179,6 +181,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   hashSyncLimitEnabled: false,
   hashSyncLimit: 50000,
   largeFileNoticeShown: [],
+  syncEngineVersion: "v3",
+  v3ConflictStrategy: "newest-wins",
 }
 
 export type TabId = "GENERAL" | "DISPLAY" | "SHORTCUT" | "REMOTE" | "SYNC" | "CLOUD" | "DEBUG"
@@ -524,18 +528,6 @@ export class SettingTab extends PluginSettingTab {
     )
     this.setDescWithBreaks(set.lastElementChild as HTMLElement, $("setting.sync.startup_delay_desc"))
 
-    new Setting(set).setName($("setting.debug.update_source")).addDropdown((dropdown) =>
-      dropdown
-        .addOption("github", "GitHub")
-        .addOption("cnb", "腾讯 cnb")
-        .setValue(this.plugin.settings.updateSource || "github")
-        .onChange(async (value: "github" | "cnb") => {
-          this.plugin.settings.updateSource = value
-          await this.plugin.saveAndReloadServices()
-        }),
-    )
-    this.setDescWithBreaks(set.lastElementChild as HTMLElement, $("setting.debug.update_source_desc"))
-
     new Setting(set).setName($("setting.support.title")).setHeading().setClass("fast-note-sync-settings-tag")
 
     const supportSet = set.createDiv()
@@ -719,7 +711,7 @@ export class SettingTab extends PluginSettingTab {
           $("ui.title.notice"),
           $("setting.support.issue_notice"),
           () => {
-            window.open("https://github.com/haierkeys/obsidian-fast-note-sync/issues", "_blank")
+            window.open("https://github.com/eytb2/obsidian-fast-note-sync/issues", "_blank")
           },
           $("ui.button.goto_feedback"),
           $("ui.button.cancel"),
@@ -730,7 +722,7 @@ export class SettingTab extends PluginSettingTab {
       const featureButton = debugDiv.createEl("button")
       featureButton.setText($("setting.support.feature"))
       featureButton.onclick = () => {
-        window.open("https://github.com/haierkeys/obsidian-fast-note-sync/issues", "_blank")
+        window.open("https://github.com/eytb2/obsidian-fast-note-sync/issues", "_blank")
       }
 
       const telegramButton = debugDiv.createEl("button")
@@ -1023,19 +1015,14 @@ export class SettingTab extends PluginSettingTab {
           btn.textContent = $("setting.debug.version_installing") || "正在安装...";
 
           try {
-            const source = this.plugin.settings.updateSource || "github";
             const zipFileName = `fast-note-sync-v${latest}.zip`;
             const pluginDir = getPluginDir(this.plugin);
 
-            let url = "";
-            if (source === "github") {
-              url = `https://github.com/haierkeys/obsidian-fast-note-sync/releases/download/${latest}/${zipFileName}`;
-            } else {
-              // CNB 链接格式：releases/download/{version}/fast-note-sync-v{version}.zip
-              url = `https://cnb.cool/haierkeys/obsidian-fast-note-sync/-/releases/download/${latest}/${zipFileName}`;
-            }
+            // 升级包只从自建 GitHub 仓库下载（eytb2）
+            // Upgrade packages are downloaded from the self-hosted GitHub repo (eytb2) only
+            const url = `https://github.com/eytb2/obsidian-fast-note-sync/releases/download/${latest}/${zipFileName}`;
 
-            dump(`[fast-note-sync] preparing download. Source: ${source}, Tag: ${tag}, Zip: ${zipFileName}, Dir: ${pluginDir}, URL: ${url}`);
+            dump(`[fast-note-sync] preparing download. Tag: ${tag}, Zip: ${zipFileName}, Dir: ${pluginDir}, URL: ${url}`);
             showSyncNotice($("ui.version.downloading_file", { file: zipFileName }) || `正在下载 ${zipFileName}...`);
 
             // 3. 跨域下载 Zip 包 / Download zip with requestUrl to bypass CORS and gain speed
@@ -1839,6 +1826,50 @@ export class SettingTab extends PluginSettingTab {
           }),
       )
     this.setDescWithBreaks(set.lastElementChild as HTMLElement, $("setting.sync.merge_strategy_desc"))
+
+    // v3 引擎版本与冲突策略（设计文档 §3：策略每次决策现读，改动即时生效）
+    new Setting(set)
+      .setName($("setting.sync.engine_version"))
+      .setClass("fns-setting-item-vertical")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("v3", $("setting.sync.engine_v3"))
+          .addOption("v2", $("setting.sync.engine_v2"))
+          .setValue(this.plugin.settings.syncEngineVersion || "v3")
+          .onChange(async (value) => {
+            const v = value === "v2" ? "v2" : "v3"
+            if (v === this.plugin.settings.syncEngineVersion) return
+            this.plugin.settings.syncEngineVersion = v
+            await this.plugin.saveSettings()
+            // 引擎切换即时生效：v3 → 装配控制器；v2 → 停止并回退旧启动同步
+            this.plugin.stopV3Controller()
+            await this.plugin.ensureV3Controller()
+            if (v === "v2") {
+              await this.plugin.saveAndReloadServices("syncEngineVersion")
+            } else {
+              void this.plugin.v3Controller?.runNow()
+            }
+            this.refresh()
+          }),
+      )
+    this.setDescWithBreaks(set.lastElementChild as HTMLElement, $("setting.sync.engine_version_desc"))
+
+    new Setting(set)
+      .setName($("setting.sync.v3_conflict"))
+      .setClass("fns-setting-item-vertical")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("newest-wins", $("setting.sync.v3_strategy_newest"))
+          .addOption("server-wins", $("setting.sync.v3_strategy_server"))
+          .addOption("local-wins", $("setting.sync.v3_strategy_local"))
+          .addOption("copy", $("setting.sync.v3_strategy_copy"))
+          .setValue(this.plugin.settings.v3ConflictStrategy || "newest-wins")
+          .onChange(async (value) => {
+            this.plugin.settings.v3ConflictStrategy = value as PluginSettings["v3ConflictStrategy"]
+            await this.plugin.saveSettings()
+          }),
+      )
+    this.setDescWithBreaks(set.lastElementChild as HTMLElement, $("setting.sync.v3_conflict_desc"))
   }
 
   private renderCloudSettings(set: HTMLElement) {

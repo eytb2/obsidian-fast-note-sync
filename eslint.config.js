@@ -33,4 +33,13 @@ export default defineConfig([
       "obsidianmd/prefer-file-manager-trash-file": "error",
     },
   },
+  {
+    // fns-cli：Node 专属无头客户端（设计文档 §3/P4），Obsidian 专有规则不适用
+    files: ["cli/**"],
+    rules: {
+      "obsidianmd/no-nodejs-modules": "off",
+      "obsidianmd/no-global-this": "off",
+      "obsidianmd/prefer-window-timers": "off",
+    },
+  },
 ]);

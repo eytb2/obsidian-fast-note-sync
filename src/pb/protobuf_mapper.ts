@@ -1,11 +1,24 @@
-import * as WSAction from "../lib/sync/websocket_action";
-import { proto } from "./v1/sync";
-
-
 /**
- * This module provides mapping and translation between raw JSON DTOs and Protobuf messages.
- * 本模块提供原始 JSON DTO 与 Protobuf 消息之间的映射与互转。
+ * v3 协议的 protobuf 映射（P8）：JSON DTO ⇄ fns.v3 消息体。
+ *
+ * 与服务端 internal/routers/websocket_router/protobuf_v3.go 逐字段对齐；信封（WSMessage/
+ * WSResponse）与 JSON 帧的 `action|{code,...}` 同构。编码策略与服务端一致：
+ *  - 已知 v3 动作 → 纯 pb 消息体；
+ *  - 未知动作 → JSON 字节兜底（握手应答等任意 map；两侧对称实现，互为兜底）。
+ * 旧协议 v1 消息族已随服务端 P7R 移除，本文件只保留 v3 + ClientInfo。
  */
+import * as WSAction from "../lib/sync/websocket_action";
+import { fns } from "./v3/sync";
+
+const pb = fns.v3;
+
+/** 服务端→客户端动作名单（信封内层按 pb 解；不在名单的按 JSON 解） */
+const PB_RECEIVE_ACTIONS = new Set<string>([
+    "V3SyncPlan", "V3BlobNeed", "V3BlobPage", "V3CommitAck", "V3NotifyManifest",
+    "V3BlobUploadOpenAck", "V3BlobUploadAck", "V3BlobChunk",
+]);
+
+// ── 上行（C→S）───────────────────────────────────────────────────────────────
 
 /**
  * Encodes payload into specific Protobuf binary message depending on the action.
@@ -18,534 +31,28 @@ function enSendDataPayload(action: WSAction.WSSendAction, payload: unknown): Uin
     const properties = payload as Record<string, unknown>;
     switch (action) {
         case WSAction.ClientReceiveInfo: {
-            const msg = proto.v1.ClientInfoMessage.create(properties);
-            return proto.v1.ClientInfoMessage.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveSync: {
-            const msg = proto.v1.NoteSyncRequest.create(properties);
-            return proto.v1.NoteSyncRequest.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveModify: {
-            const msg = proto.v1.NoteModifyOrCreateRequest.create(properties);
-            return proto.v1.NoteModifyOrCreateRequest.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveCheck: {
-            const msg = proto.v1.NoteUpdateCheckRequest.create(properties);
-            return proto.v1.NoteUpdateCheckRequest.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveDelete: {
-            const msg = proto.v1.NoteDeleteRequest.create(properties);
-            return proto.v1.NoteDeleteRequest.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveRename: {
-            const msg = proto.v1.NoteRenameRequest.create(properties);
-            return proto.v1.NoteRenameRequest.encode(msg).finish();
-        }
-        case WSAction.NoteReceiveRePush: {
-            const msg = proto.v1.NoteGetRequest.create(properties);
-            return proto.v1.NoteGetRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveSync: {
-            const msg = proto.v1.FileSyncRequest.create(properties);
-            return proto.v1.FileSyncRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveUploadCheck: {
-            const msg = proto.v1.FileUploadCheckRequest.create(properties);
-            return proto.v1.FileUploadCheckRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveDelete: {
-            const msg = proto.v1.FileDeleteRequest.create(properties);
-            return proto.v1.FileDeleteRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveRename: {
-            const msg = proto.v1.FileRenameRequest.create(properties);
-            return proto.v1.FileRenameRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveChunkDownload: {
-            const msg = proto.v1.FileChunkDownloadRequest.create(properties);
-            return proto.v1.FileChunkDownloadRequest.encode(msg).finish();
-        }
-        case WSAction.FileReceiveRePush: {
-            const msg = proto.v1.FileGetRequest.create(properties);
-            return proto.v1.FileGetRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveSync: {
-            const msg = proto.v1.SettingSyncRequest.create(properties);
-            return proto.v1.SettingSyncRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveModify: {
-            const msg = proto.v1.SettingModifyOrCreateRequest.create(properties);
-            return proto.v1.SettingModifyOrCreateRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveCheck: {
-            const msg = proto.v1.SettingUpdateCheckRequest.create(properties);
-            return proto.v1.SettingUpdateCheckRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveDelete: {
-            const msg = proto.v1.SettingDeleteRequest.create(properties);
-            return proto.v1.SettingDeleteRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveClear: {
-            const msg = proto.v1.SettingClearRequest.create(properties);
-            return proto.v1.SettingClearRequest.encode(msg).finish();
-        }
-        case WSAction.SettingReceiveRePush: {
-            const msg = proto.v1.SettingGetRequest.create(properties);
-            return proto.v1.SettingGetRequest.encode(msg).finish();
-        }
-        case WSAction.FolderReceiveSync: {
-            const msg = proto.v1.FolderSyncRequest.create(properties);
-            return proto.v1.FolderSyncRequest.encode(msg).finish();
-        }
-        case WSAction.FolderReceiveModify: {
-            const msg = proto.v1.FolderCreateRequest.create(properties);
-            return proto.v1.FolderCreateRequest.encode(msg).finish();
-        }
-        case WSAction.FolderReceiveDelete: {
-            const msg = proto.v1.FolderDeleteRequest.create(properties);
-            return proto.v1.FolderDeleteRequest.encode(msg).finish();
-        }
-        case WSAction.FolderReceiveRename: {
-            const msg = proto.v1.FolderRenameRequest.create(properties);
-            return proto.v1.FolderRenameRequest.encode(msg).finish();
-        }
-        case WSAction.FolderSyncPageAck: {
-            const msg = proto.v1.FolderSyncPageAckRequest.create(properties);
-            return proto.v1.FolderSyncPageAckRequest.encode(msg).finish();
-        }
-        case WSAction.NoteSyncPageAck: {
-            const msg = proto.v1.NoteSyncPageAckRequest.create(properties);
-            return proto.v1.NoteSyncPageAckRequest.encode(msg).finish();
-        }
-        case WSAction.FileSyncPageAck: {
-            const msg = proto.v1.FileSyncPageAckRequest.create(properties);
-            return proto.v1.FileSyncPageAckRequest.encode(msg).finish();
-        }
-        case WSAction.SettingSyncPageAck: {
-            const msg = proto.v1.SettingSyncPageAckRequest.create(properties);
-            return proto.v1.SettingSyncPageAckRequest.encode(msg).finish();
-        }
-        default: {
-            // Fallback to JSON encoding if not supported explicitly in proto definitions
-            // 对于 proto 定义中未明确支持的消息，降级使用 JSON 编码
-            const jsonStr = typeof payload === "string" ? payload : JSON.stringify(payload);
-            return new TextEncoder().encode(jsonStr);
-        }
-    }
-}
-
-/**
- * Decodes specific Protobuf binary message depending on the action.
- * 根据动作类型解码特定的 Protobuf 二进制消息。
- */
-function deReceiveProtobufToDTO(action: WSAction.WSReceiveAction, data: Uint8Array): unknown {
-    if (!data || data.length === 0) {
-        return null;
-    }
-    const tryJsonDecode = (): unknown => {
-        try {
-            const jsonStr = new TextDecoder().decode(data);
-            return JSON.parse(jsonStr) as unknown;
-        } catch {
-            return null;
-        }
-    };
-    switch (action) {
-        case WSAction.ClientInfo: {
-            try {
-                return proto.v1.CheckVersionInfo.toObject(
-                    proto.v1.CheckVersionInfo.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncModify: {
-            try {
-                return proto.v1.NoteSyncModifyMessage.toObject(
-                    proto.v1.NoteSyncModifyMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncDelete: {
-            try {
-                return proto.v1.NoteSyncDeleteMessage.toObject(
-                    proto.v1.NoteSyncDeleteMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncRename: {
-            try {
-                return proto.v1.NoteSyncRenameMessage.toObject(
-                    proto.v1.NoteSyncRenameMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncMtime: {
-            try {
-                return proto.v1.NoteSyncMtimeMessage.toObject(
-                    proto.v1.NoteSyncMtimeMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncEnd: {
-            try {
-                return proto.v1.NoteSyncEndMessage.toObject(
-                    proto.v1.NoteSyncEndMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncNeedPush: {
-            try {
-                return proto.v1.NoteSyncNeedPushMessage.toObject(
-                    proto.v1.NoteSyncNeedPushMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteModifyAck: {
-            try {
-                return proto.v1.NoteModifyAckMessage.toObject(
-                    proto.v1.NoteModifyAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteRenameAck: {
-            try {
-                return proto.v1.NoteRenameAckMessage.toObject(
-                    proto.v1.NoteRenameAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteDeleteAck: {
-            try {
-                return proto.v1.NoteDeleteAckMessage.toObject(
-                    proto.v1.NoteDeleteAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncUpdate: {
-            try {
-                return proto.v1.FileSyncModifyMessage.toObject(
-                    proto.v1.FileSyncModifyMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncDelete: {
-            try {
-                return proto.v1.FileSyncDeleteMessage.toObject(
-                    proto.v1.FileSyncDeleteMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncRename: {
-            try {
-                return proto.v1.FileSyncRenameMessage.toObject(
-                    proto.v1.FileSyncRenameMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncMtime: {
-            try {
-                return proto.v1.FileSyncMtimeMessage.toObject(
-                    proto.v1.FileSyncMtimeMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncEnd: {
-            try {
-                return proto.v1.FileSyncEndMessage.toObject(
-                    proto.v1.FileSyncEndMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileUpload: {
-            try {
-                const pbObj = proto.v1.FileSyncUploadMessage.toObject(
-                    proto.v1.FileSyncUploadMessage.decode(data),
-                    { defaults: true, longs: Number }
-                ) as proto.v1.FileSyncUploadMessage.$Properties;
-                return {
-                    path: pbObj.path,
-                    pathHash: pbObj.pathHash,
-                    sessionId: pbObj.sessionId,
-                    chunkSize: pbObj.chunkSize
-                };
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncChunkDownload: {
-            try {
-                const pbObj = proto.v1.FileSyncDownloadMessage.toObject(
-                    proto.v1.FileSyncDownloadMessage.decode(data),
-                    { defaults: true, longs: Number }
-                ) as proto.v1.FileSyncDownloadMessage.$Properties;
-                return {
-                    path: pbObj.path,
-                    contentHash: pbObj.contentHash,
-                    ctime: pbObj.ctime,
-                    mtime: pbObj.mtime,
-                    sessionId: pbObj.sessionId,
-                    chunkSize: pbObj.chunkSize,
-                    totalChunks: pbObj.totalChunks,
-                    size: pbObj.size
-                };
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileRenameAck: {
-            try {
-                return proto.v1.FileRenameAckMessage.toObject(
-                    proto.v1.FileRenameAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileUploadAck: {
-            try {
-                return proto.v1.FileUploadAckMessage.toObject(
-                    proto.v1.FileUploadAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileDeleteAck: {
-            try {
-                return proto.v1.FileDeleteAckMessage.toObject(
-                    proto.v1.FileDeleteAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncModify: {
-            try {
-                return proto.v1.SettingSyncModifyMessage.toObject(
-                    proto.v1.SettingSyncModifyMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncDelete: {
-            try {
-                return proto.v1.SettingSyncDeleteMessage.toObject(
-                    proto.v1.SettingSyncDeleteMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncMtime: {
-            try {
-                return proto.v1.SettingSyncMtimeMessage.toObject(
-                    proto.v1.SettingSyncMtimeMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncEnd: {
-            try {
-                return proto.v1.SettingSyncEndMessage.toObject(
-                    proto.v1.SettingSyncEndMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncNeedUpload: {
-            try {
-                return proto.v1.SettingSyncNeedUploadMessage.toObject(
-                    proto.v1.SettingSyncNeedUploadMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingModifyAck: {
-            try {
-                return proto.v1.SettingModifyAckMessage.toObject(
-                    proto.v1.SettingModifyAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingDeleteAck: {
-            try {
-                return proto.v1.SettingDeleteAckMessage.toObject(
-                    proto.v1.SettingDeleteAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncClear: {
-            return null;
-        }
-        case WSAction.FolderSyncModify: {
-            try {
-                return proto.v1.FolderSyncModifyMessage.toObject(
-                    proto.v1.FolderSyncModifyMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderSyncDelete: {
-            try {
-                return proto.v1.FolderSyncDeleteMessage.toObject(
-                    proto.v1.FolderSyncDeleteMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderSyncRename: {
-            try {
-                return proto.v1.FolderSyncRenameMessage.toObject(
-                    proto.v1.FolderSyncRenameMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderSyncEnd: {
-            try {
-                return proto.v1.FolderSyncEndMessage.toObject(
-                    proto.v1.FolderSyncEndMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderModifyAck: {
-            try {
-                return proto.v1.FolderModifyAckMessage.toObject(
-                    proto.v1.FolderModifyAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderDeleteAck: {
-            try {
-                return proto.v1.FolderDeleteAckMessage.toObject(
-                    proto.v1.FolderDeleteAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderRenameAck: {
-            try {
-                return proto.v1.FolderRenameAckMessage.toObject(
-                    proto.v1.FolderRenameAckMessage.decode(data),
-                    { defaults: true, longs: Number }
-                );
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.NoteSyncPage: {
-            try {
-                const pbObj = proto.v1.NoteSyncPageMessage.decode(data);
-                return proto.v1.NoteSyncPageMessage.toObject(pbObj, { defaults: true, longs: Number });
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FileSyncPage: {
-            try {
-                const pbObj = proto.v1.FileSyncPageMessage.decode(data);
-                return proto.v1.FileSyncPageMessage.toObject(pbObj, { defaults: true, longs: Number });
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.SettingSyncPage: {
-            try {
-                const pbObj = proto.v1.SettingSyncPageMessage.decode(data);
-                return proto.v1.SettingSyncPageMessage.toObject(pbObj, { defaults: true, longs: Number });
-            } catch {
-                return tryJsonDecode();
-            }
-        }
-        case WSAction.FolderSyncPage: {
-            try {
-                const pbObj = proto.v1.FolderSyncPageMessage.decode(data);
-                return proto.v1.FolderSyncPageMessage.toObject(pbObj, { defaults: true, longs: Number });
-            } catch {
-                return tryJsonDecode();
-            }
+            const msg = pb.ClientInfoMessage.create(properties);
+            return pb.ClientInfoMessage.encode(msg).finish();
+        }
+        case "V3Sync": {
+            const msg = pb.V3SyncRequest.create(properties);
+            return pb.V3SyncRequest.encode(msg).finish();
+        }
+        case "V3Commit": {
+            const msg = pb.V3ManifestCommitRequest.create(properties);
+            return pb.V3ManifestCommitRequest.encode(msg).finish();
+        }
+        case "V3BlobUpload": {
+            const msg = pb.V3BlobUploadOpenRequest.create(properties);
+            return pb.V3BlobUploadOpenRequest.encode(msg).finish();
+        }
+        case "V3BlobDownload": {
+            const msg = pb.V3BlobDownloadRequest.create(properties);
+            return pb.V3BlobDownloadRequest.encode(msg).finish();
         }
         default:
-            // Fallback to JSON decoding if not supported explicitly in proto definitions
-            // 对于 proto 定义中未明确支持的消息，降级使用 JSON 解码
-            return tryJsonDecode();
+            // 未知动作：JSON 字节兜底（与服务端 enV3DataPayload 的兜底对称）
+            return new TextEncoder().encode(JSON.stringify(payload));
     }
 }
 
@@ -555,12 +62,14 @@ function deReceiveProtobufToDTO(action: WSAction.WSReceiveAction, data: Uint8Arr
  */
 export function enSendDTOToProtobuf(action: WSAction.WSSendAction, payload: unknown): Uint8Array {
     const innerBytes = enSendDataPayload(action, payload);
-    const wsMsg = proto.v1.WSMessage.create({
+    const wsMsg = pb.WSMessage.create({
         type: action,
         data: innerBytes
     });
-    return proto.v1.WSMessage.encode(wsMsg).finish();
+    return pb.WSMessage.encode(wsMsg).finish();
 }
+
+// ── 下行（S→C）───────────────────────────────────────────────────────────────
 
 export interface DeserializedWSResponse {
     action: WSAction.WSReceiveAction;
@@ -571,23 +80,80 @@ export interface DeserializedWSResponse {
     details: string;
     vault: string;
     context: string;
-    // WSResponse 信封 pageIndex，线上值为 1-based：0/undefined=非分页消息，n>0=下载第 n-1 页。
-    // 原始值在此透传，1-based→0-based 的转换统一在 websocket_manager.ts 做（见其注释）。
-    // WSResponse envelope pageIndex, wire value is 1-based: 0/undefined=non-paginated message,
-    // n>0=download page n-1. Passed through raw here; the 1-based->0-based conversion is done in
-    // one place, websocket_manager.ts (see its comment).
     pageIndex: number;
+}
+
+/** toObject 统一参数：补齐默认值（与 JSON 帧形状对齐：Go 侧无 omitempty，空串/0/false 也会下发）、
+ *  空数组显式化（服务端空 slice 序列化为 []）、数值 long */
+const TO_OBJECT_OPTS = { defaults: true, arrays: true, longs: Number } as const;
+
+function tryJsonDecode(bytes: Uint8Array): unknown {
+    try {
+        return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+        return undefined;
+    }
+}
+
+/**
+ * Decodes inner response payload by action. Known v3 actions decode as pb,
+ * everything else falls back to JSON (server does the same for its fallbacks).
+ * 按动作解码内层应答载荷：已知 v3 动作按 pb 解，其余按 JSON 兜底（与服务端对称）。
+ */
+function deReceiveProtobufToDTO(action: string, bytes: Uint8Array): unknown {
+    if (!PB_RECEIVE_ACTIONS.has(action) || bytes.length === 0) {
+        return tryJsonDecode(bytes);
+    }
+    try {
+        switch (action) {
+            case "V3SyncPlan": {
+                const pbObj = pb.V3SyncPlanMessage.decode(bytes);
+                return pb.V3SyncPlanMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3BlobNeed": {
+                const pbObj = pb.V3BlobNeedMessage.decode(bytes);
+                return pb.V3BlobNeedMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3BlobPage": {
+                const pbObj = pb.V3BlobPageMessage.decode(bytes);
+                return pb.V3BlobPageMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3CommitAck": {
+                const pbObj = pb.V3ManifestCommitAckMessage.decode(bytes);
+                return pb.V3ManifestCommitAckMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3NotifyManifest": {
+                const pbObj = pb.V3NotifyManifestMessage.decode(bytes);
+                return pb.V3NotifyManifestMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3BlobUploadOpenAck": {
+                const pbObj = pb.V3BlobUploadOpenMessage.decode(bytes);
+                return pb.V3BlobUploadOpenMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3BlobUploadAck": {
+                const pbObj = pb.V3BlobUploadAckMessage.decode(bytes);
+                return pb.V3BlobUploadAckMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+            case "V3BlobChunk": {
+                const pbObj = pb.V3BlobChunkMessage.decode(bytes);
+                return pb.V3BlobChunkMessage.toObject(pbObj, TO_OBJECT_OPTS);
+            }
+        }
+    } catch {
+        return tryJsonDecode(bytes);
+    }
+    return tryJsonDecode(bytes);
 }
 
 /**
  * Unpacks the outer WSMessage packet and decodes the inner response payload.
- * 解包最外层 WSMessage 报文并解码内层响应数据。
+ * 解包最外层 WSMessage 报文并解码内层应答载荷。
  */
 export function deReceivePacket(data: Uint8Array): DeserializedWSResponse {
-    const wsMsg = proto.v1.WSMessage.decode(data);
+    const wsMsg = pb.WSMessage.decode(data);
     const action: WSAction.WSReceiveAction = wsMsg.type || "";
 
-    const wsResp = proto.v1.WSResponse.decode(wsMsg.data);
+    const wsResp = pb.WSResponse.decode(wsMsg.data);
 
     const dtoData = deReceiveProtobufToDTO(action, wsResp.data);
 

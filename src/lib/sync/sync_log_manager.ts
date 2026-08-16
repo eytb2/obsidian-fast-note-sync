@@ -1,4 +1,4 @@
-import { moment } from "obsidian";
+import { moment, normalizePath } from "obsidian";
 
 const safeMoment = moment as unknown as (inp?: unknown) => { format(format: string): string };
 
@@ -83,6 +83,49 @@ const HIGH_FREQUENCY_RECEIVE_ACTIONS = new Set([
     "FolderSyncModify", "FolderSyncDelete", "FolderSyncRename",
 ]);
 
+// 日志文件上限（字符）：超过后保留尾部一半并丢弃头部，防无限增长。
+// 一天 288 条 5 分钟周期轮次 ≈ 60KB，2M 字符 ≈ 数月余量。
+// Log file cap (chars): when exceeded, keep the tail half and drop the head.
+// ~288 five-minute round entries/day ≈ 60KB, so 2M chars ≈ months of headroom.
+const LOG_FILE_MAX_CHARS = 2 * 1024 * 1024;
+// 重载后回灌进内存的历史行数上限（视图里能翻到的最远历史）
+// Max history lines reloaded into memory after a plugin reload
+const HISTORY_LOAD_LINES = 300;
+
+/**
+ * 解析 persistToFile 写出的一行日志（人读格式）回 SyncLog。
+ * 纯函数不依赖 obsidian API，时间戳按本地时区解析（写入时就是本地时间）。
+ * Parse one persisted human-readable log line back into a SyncLog.
+ * Pure function with no obsidian dependency; timestamp parsed as local time
+ * (it was written as local time).
+ */
+export function parseLogLine(line: string): SyncLog | undefined {
+    // 格式：[2026-08-15 19:19:08] [INFO   ] [OTHER        ] [SUCCESS ] V3SyncRound   [Path: x] [Msg: y]
+    const m = /^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s*\[(\w+)\s*\]\s*\[(\w+)\s*\]\s*\[(\w+)\s*\]\s*(\S+)\s*(.*)$/.exec(line);
+    if (!m) return undefined;
+    const [, timeStr, typeStr, categoryStr, statusStr, action, rest] = m;
+    const t = typeStr.toLowerCase();
+    const type: LogType = t === "send" || t === "receive" || t === "error" ? t : "info";
+    const st = statusStr.toLowerCase();
+    const status: LogStatus = st === "error" || st === "pending" || st === "cancelled" ? st : "success";
+    const cat = categoryStr.toLowerCase();
+    const category: LogCategory =
+        cat === "note" || cat === "attachment" || cat === "config" || cat === "folder" || cat === "summary" ? cat : "other";
+    const pathMatch = /\[Path: (.*?)\]/.exec(rest);
+    const msgMatch = /\[Msg: (.*)\]$/.exec(rest);
+    const ts = Date.parse(timeStr.replace(" ", "T"));
+    return {
+        id: "",
+        timestamp: Number.isNaN(ts) ? 0 : ts,
+        type,
+        category,
+        action,
+        path: pathMatch?.[1],
+        status,
+        message: msgMatch?.[1],
+    };
+}
+
 export class SyncLogManager {
     private static instance: SyncLogManager;
     // 底层改为 Map<id, SyncLog>，保序用 Map 天然的插入序，upsert 变为 O(1)（原 findIndex 为 O(n)）
@@ -123,6 +166,15 @@ export class SyncLogManager {
 
     public init(plugin: FastSync) {
         this.plugin = plugin;
+        // 日志落盘：插件目录下 sync.log。logFilePath 此前从未被赋值，persistToFile 恒早退，
+        // 日志退化成纯内存态——Obsidian 一重载就清空，视图打开是空的。接到磁盘后：
+        // shell 可 tail -f 观测轮次（事后检测），启动时回灌最近历史（见 loadFromFile）。
+        try {
+            this.logFilePath = normalizePath(`${plugin.manifest.dir}/sync.log`);
+        } catch {
+            this.logFilePath = ".obsidian/plugins/fast-note-sync/sync.log";
+        }
+        void this.loadFromFile();
     }
 
     private getCategory(action: string): LogCategory {
@@ -318,6 +370,13 @@ export class SyncLogManager {
      * @param currentSyncType 当前同步类型
      */
     public logReceivedMessage(action: string, data: unknown, currentSyncType: string): void {
+        // v3 线帧降噪：成功/常规帧不记（见 logSentMessage 注释）；错误帧保留，便于诊断
+        if (action.startsWith("V3")) {
+            const d = data as { code?: number } | null;
+            const code = typeof d === "object" && d !== null ? d.code : undefined;
+            const isError = code !== undefined && (code === 0 || code > 200);
+            if (!isError) return;
+        }
         // 过滤不需要记录的消息类型 / Filter out unnecessary message types from logging
         const excludedActions = [
             "Pong", "Authorization", "ClientInfo", "FileUploadCheck", "FileChunkDownload", "NoteSyncNeedPush", "FileSyncUpdate", "FileSyncChunkDownload",
@@ -396,6 +455,11 @@ export class SyncLogManager {
      * @param currentSyncType 当前同步类型
      */
     public logSentMessage(action: string, data: object | string, currentSyncType: string): void {
+        // v3 线帧（V3Sync/BlobNeed/SyncPlan…）是协议内部流量，不是用户可读的同步事件——
+        // 逐帧记录只会刷屏且无 i18n 键（视图回显原始键名）。轮次级汇总由 v3_controller 写入。
+        if (action.startsWith("V3")) {
+            return;
+        }
         // 过滤不需要记录的消息类型 / Filter out unnecessary message types from logging
         const excludedActions = [
             "Ping", "Authorization", "ClientInfo", "FileUploadCheck", "FileChunkDownload", "NoteSyncNeedPush",
@@ -501,6 +565,46 @@ export class SyncLogManager {
                     this.doNotify();
                 }
             }, this.NOTIFY_THROTTLE_MS - elapsed);
+        }
+    }
+
+    /**
+     * 启动时从 sync.log 回灌最近历史到内存 Map：
+     * - 文件不存在 → 创建空文件（否则后续 append 会失败）
+     * - 超过 LOG_FILE_MAX_CHARS → 保留尾部一半重写（轮转）
+     * - 最多回灌 HISTORY_LOAD_LINES 行，error 行计入 failedCount（供"仅看失败"），
+     *   但不计 unreadFailedCount——历史失败不重触发状态栏红点
+     * 直插 Map 绕过 addOrUpdateLog，避免回灌本身再写一遍盘。
+     */
+    private async loadFromFile(): Promise<void> {
+        if (!this.plugin || !this.logFilePath) return;
+        const adapter = this.plugin.app.vault.adapter;
+        try {
+            let text: string;
+            try {
+                text = await adapter.read(this.logFilePath);
+            } catch {
+                try { await adapter.write(this.logFilePath, ""); } catch { }
+                return;
+            }
+            if (text.length > LOG_FILE_MAX_CHARS) {
+                const tail = text.slice(-Math.floor(LOG_FILE_MAX_CHARS / 2));
+                const nl = tail.indexOf("\n");
+                text = nl >= 0 ? tail.slice(nl + 1) : tail;
+                try { await adapter.write(this.logFilePath, text); } catch { }
+            }
+            const lines = text.split("\n");
+            const start = Math.max(0, lines.length - 1 - HISTORY_LOAD_LINES);
+            for (let i = start; i < lines.length; i++) {
+                const parsed = parseLogLine(lines[i]);
+                if (!parsed) continue;
+                parsed.id = `hist-${i}`;
+                this.logs.set(parsed.id, parsed);
+                if (parsed.status === "error") this.failedCount++;
+            }
+            this.notify();
+        } catch (e) {
+            dumpError("Failed to load sync log file:", e);
         }
     }
 

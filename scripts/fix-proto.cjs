@@ -1,7 +1,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const dtsPath = path.join(__dirname, "..", "src", "pb", "v1", "sync.d.ts");
+const target = process.argv[2] || "v1";
+const dtsPath = path.join(__dirname, "..", "src", "pb", target, "sync.d.ts");
 
 if (fs.existsSync(dtsPath)) {
     let content = fs.readFileSync(dtsPath, "utf8");

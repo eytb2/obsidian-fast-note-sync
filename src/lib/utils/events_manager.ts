@@ -21,11 +21,18 @@ export class EventManager {
     this.plugin = plugin
   }
 
+  /** v3 引擎：事件只做信号（防抖整轮对账），不再逐文件组包 */
+  private isV3(): boolean {
+    return this.plugin.settings.syncEngineVersion === "v3" && !!this.plugin.v3Controller
+  }
+
   public registerEvents() {
-    // 添加哈希表就绪检查
-    if (!this.plugin.fileHashManager || !this.plugin.fileHashManager.isReady()) {
-      dump("EventManager: 文件哈希管理器未就绪,跳过事件注册")
-      return
+    // v3 引擎不依赖旧哈希表（扫描现算 + mtime/size 预过滤缓存）
+    if (!this.isV3()) {
+      if (!this.plugin.fileHashManager || !this.plugin.fileHashManager.isReady()) {
+        dump("EventManager: 文件哈希管理器未就绪,跳过事件注册")
+        return
+      }
     }
 
     const { app } = this.plugin
@@ -141,6 +148,12 @@ export class EventManager {
     }
     if (this.plugin.settings.manualSyncEnabled || this.plugin.settings.readonlySyncEnabled) return
 
+    // v3：内容变化只做信号——扫描现算哈希，无需逐文件组包（重命名伴随的 modify 同样无害）
+    if (this.isV3()) {
+      this.plugin.v3Controller?.notifyLocalChange()
+      return
+    }
+
     // 重命名会同时触发 rename 和 modify 事件，但只需要发送 rename 消息即可完成处理，因此跳过 modify 事件
     if (this.pendingRenamePaths.has(file.path)) {
       dump(`Modify skipped due to pending rename: ${file.path}`)
@@ -167,6 +180,12 @@ export class EventManager {
     }
     if (this.plugin.settings.manualSyncEnabled || this.plugin.settings.readonlySyncEnabled) return
 
+    // v3：立即记墓碑（离线删除上报依赖身份映射），防抖跑整轮
+    if (this.isV3()) {
+      this.plugin.v3Controller?.notifyLocalDelete(file.path)
+      return
+    }
+
     this.runWithDelay(file.path, () => {
       if (file instanceof TFile) {
         if (file.path.endsWith(".md")) {
@@ -186,6 +205,13 @@ export class EventManager {
       return
     }
     if (this.plugin.settings.manualSyncEnabled || this.plugin.settings.readonlySyncEnabled) return
+
+    // v3：立即迁移基线身份映射（move-by-id 检测依赖）；扩展名变更无需特判——
+    // 内容寻址哈希不变即 move，变了服务器按 delete+add 自然收敛
+    if (this.isV3()) {
+      this.plugin.v3Controller?.notifyLocalRename(oldFile, file.path)
+      return
+    }
 
     // 清除旧路径上可能存在的 modify/delete 定时器
     // 因为旧路径已经被重命名，这些操作已无意义
@@ -262,6 +288,12 @@ export class EventManager {
     if (this.plugin.settings.manualSyncEnabled || this.plugin.settings.readonlySyncEnabled) return
     // 路径安全性校验
     if (!isPathInConfigSyncDirs(path, this.plugin)) return
+
+    // v3：配置文件变化同样只做信号
+    if (this.isV3()) {
+      this.plugin.v3Controller?.notifyLocalChange()
+      return
+    }
 
     this.runWithDelay(
       path,

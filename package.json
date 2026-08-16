@@ -15,12 +15,17 @@
     "test:auth": "node tests/websocket-auth-error.test.mjs",
     "test:mirror": "node tests/file-mirror-restore.test.mjs",
     "test:vault-name": "node tests/vault-name-setting.test.mjs",
+    "test:v3core": "tsx tests/v3-core.test.mjs",
+    "test:cli": "node tests/cli-smoke.test.mjs",
+    "build:cli": "node esbuild.cli.mjs production && chmod +x dist/fns-cli.mjs",
     "ver": "node ./scripts/update-version.js",
     "dist": "npx tsx scripts/copy-dist.ts",
     "translate": "node scripts/translate-i18n.mjs --model Qwen/Qwen3.6-35B-A3B",
     "tl": "node scripts/translate-i18n.mjs --model Qwen/Qwen3.6-35B-A3B",
     "icons": "node scripts/obfuscate_icons.js --compress --width 300",
-    "proto": "pbjs -t static-module -w es6 -o src/pb/v1/sync.js ../../../../../@GoApps/fast-note-sync-service/internal/proto/v1/sync.proto && pbts -o src/pb/v1/sync.d.ts src/pb/v1/sync.js && node scripts/fix-proto.cjs"
+    "proto": "pbjs -t static-module -w es6 -o src/pb/v1/sync.js ../../../../../@GoApps/fast-note-sync-service/internal/proto/v1/sync.proto && pbts -o src/pb/v1/sync.d.ts src/pb/v1/sync.js && node scripts/fix-proto.cjs",
+    "proto:v3": "pbjs -t static-module -w es6 -o src/pb/v3/sync.js ../fast-note-sync-service/internal/proto/v3/sync_v3.proto && pbts -o src/pb/v3/sync.d.ts src/pb/v3/sync.js && node scripts/fix-proto.cjs v3",
+    "test:pb": "tsx tests/pb-v3.test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -44,6 +49,7 @@
     "stylelint-config-standard-scss": "^17.0.0",
     "stylelint-scss": "^7.2.0",
     "tslib": "^2.8.1",
+    "tsx": "^4.23.12",
     "typescript": "^5.9.3"
   },
   "dependencies": {

@@ -533,6 +533,9 @@ export const configAllPaths = async function (configDirs: string[], plugin: Fast
     const paths: string[] = []
     const adapter = plugin.app.vault.adapter
     const isExcluded = (p: string) => configIsPathExcluded(p, plugin)
+    // 底层 listing 任一失败必须整体抛错（fail-closed）：吞错返回空/部分清单，会让 v3 引擎
+    // 按基线缺失上报墓碑 → 配置被风暴式误删（2026-08-15 实测 42 条配置被连根删除）。
+    let scanFailed = false
 
     /**
      * 递归扫描通用目录
@@ -550,6 +553,7 @@ export const configAllPaths = async function (configDirs: string[], plugin: Fast
                 await scanDirRecursive(folder)
             }
         } catch (e) {
+            scanFailed = true
             dump(`Error scanning directory ${dirPath}:`, e)
         }
     }
@@ -561,6 +565,9 @@ export const configAllPaths = async function (configDirs: string[], plugin: Fast
 
             // 特殊处理配置目录（为了向后兼容和针对插件/主题的特定扫描逻辑）
             if (normalizedConfigDir.endsWith(plugin.app.vault.configDir)) {
+                // 目录整体不存在 = 用户真的删了配置目录 → 合法空清单（不置 scanFailed，
+                // 否则用户删库后每轮报错卡死同步）；存在但 listing 失败才是故障
+                if (!(await adapter.exists(normalizePath(configDir)))) continue
                 const rootItems = await adapter.list(normalizePath(configDir))
                 for (const file of rootItems.files) {
                     const fileName = file.split("/").pop() || ""
@@ -625,8 +632,13 @@ export const configAllPaths = async function (configDirs: string[], plugin: Fast
                 await scanDirRecursive(configDir)
             }
         } catch (e) {
+            scanFailed = true
             dump(`Error processing config dir ${configDir}:`, e)
         }
+    }
+    if (scanFailed) {
+        // 见函数头注释：宁可本轮失败重试，不可带病产出不完整清单
+        throw new Error(`configAllPaths: adapter scan failed for one or more dirs; aborting to avoid partial/empty listing`)
     }
     return paths
 }
