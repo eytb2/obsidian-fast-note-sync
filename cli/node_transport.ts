@@ -14,7 +14,16 @@ import type { WSEnvelope } from "../src/core/types";
 import { enSendDTOToProtobuf, deReceivePacket } from "../src/pb/protobuf_mapper";
 
 const CLIENT_TYPE = "FastNoteCLI";
-const CLIENT_VERSION = "1.0.0";
+/**
+ * CLI 与插件同仓库同 release 分发，版本号跟随插件 manifest.json（发版时同步改）。
+ * 服务端 CheckVersion 用它对比插件最新 release 判定 CLI 是否需要升级（ClientInfo 推送）。
+ * The CLI ships from the same repo/release as the plugin; keep this in sync with
+ * manifest.json. The server compares it against the latest plugin release to
+ * decide whether the CLI is outdated (ClientInfo push).
+ */
+export const CLI_VERSION = "2.4.1";
+/** 握手（TCP 连通但服务端不回鉴权应答，或 SYN 被黑洞）兜底超时：ready() 必须在此时限内完成 */
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 
 /** FNS_DEBUG=frames：stderr 打印每帧收发（E2E 排障用） */
 const DEBUG_FRAMES = (process.env.FNS_DEBUG ?? "").includes("frames");
@@ -36,6 +45,10 @@ export class NodeSyncTransport implements V3Transport {
   private ws: WebSocket | null = null;
   private authed = false;
   private closedByUs = false;
+  /** 鉴权成功过（连接进入可用态）：此后断开才上报 onClose；未就绪的失败走 ready() 拒绝 */
+  private becameReady = false;
+  /** onClose 只报一次：close()/onclose/onerror 三个来源去重 */
+  private closeNotified = false;
   private readyPromise: Promise<void> | null = null;
 
   constructor(
@@ -46,16 +59,33 @@ export class NodeSyncTransport implements V3Transport {
     private readonly protobuf = false
   ) {}
 
+  /** onClose 只上报一次，且仅当连接曾进入可用态（becameReady）。
+   * 僵尸 socket（服务端重启但 FIN 经 VPN 丢失）的 close 握手永不完成、onclose 永不
+   * 触发——因此主动 close() 也必须确定性走一次 onClose，宿主的重连才不会被饿死。 */
+  private notifyClose(reason: string): void {
+    if (this.closeNotified || !this.becameReady) return;
+    this.closeNotified = true;
+    this.events.onClose?.(reason);
+  }
+
   /** 建连并完成鉴权；失败抛错。之后 onEnvelope 持续回调。 */
   ready(): Promise<void> {
     if (this.readyPromise) return this.readyPromise;
     this.readyPromise = new Promise<void>((resolve, reject) => {
       this.closedByUs = false;
+      this.becameReady = false;
+      this.closeNotified = false;
       const ws = new WebSocket(this.wsUrl);
       ws.binaryType = "arraybuffer";
       this.ws = ws;
 
+      const handshakeTimer = globalThis.setTimeout(
+        () => failOnce(new Error("ws handshake timeout: " + this.wsUrl)),
+        HANDSHAKE_TIMEOUT_MS
+      );
+
       const failOnce = (err: Error) => {
+        globalThis.clearTimeout(handshakeTimer);
         if (this.readyPromise) {
           this.readyPromise = null;
           reject(err);
@@ -68,15 +98,16 @@ export class NodeSyncTransport implements V3Transport {
       };
 
       ws.onerror = () => {
-        if (!this.authed) failOnce(new Error("ws connect failed: " + this.wsUrl));
-        this.events.onClose?.("error");
+        if (!this.becameReady) failOnce(new Error("ws connect failed: " + this.wsUrl));
+        this.notifyClose("error");
       };
 
       ws.onclose = (ev: CloseEvent) => {
-        const wasAuthed = this.authed;
+        globalThis.clearTimeout(handshakeTimer);
+        const wasReady = this.becameReady;
         this.authed = false;
-        this.events.onClose?.(`closed code=${ev.code} reason=${ev.reason || "-"}`);
-        if (!wasAuthed && this.readyPromise) {
+        this.notifyClose(`closed code=${ev.code} reason=${ev.reason || "-"}`);
+        if (!wasReady && this.readyPromise) {
           this.readyPromise = null;
           reject(new Error("ws closed before auth: " + (ev.reason || ev.code)));
         }
@@ -112,14 +143,21 @@ export class NodeSyncTransport implements V3Transport {
             failOnce(new Error(`auth failed: ${env.code} ${env.message ?? ""}`));
             return;
           }
+          globalThis.clearTimeout(handshakeTimer);
           this.authed = true;
+          this.becameReady = true;
+          // 平台标记按真实宿主上报（此前硬编码 isDesktop 导致 ws_clients 里 CLI 平台全空）
+          const plat = process.platform;
           // pv=2&pb=1 时服务端已在 auth 应答后提前切 pb，ClientInfo 必须同样走 pb 帧
           //（文本 JSON 在 pb 连接上会被 BindAndValid 按 pb 解码而拒掉，插件侧同此规则）
           const info = {
             name: CLIENT_TYPE,
-            version: CLIENT_VERSION,
+            version: CLI_VERSION,
             type: CLIENT_TYPE,
             isDesktop: true,
+            isLinux: plat === "linux",
+            isMacOS: plat === "darwin",
+            isWin: plat === "win32",
             protobuf: this.protobuf, // P8：true = 协商升级 pb
           };
           if (this.protobuf) {
@@ -181,6 +219,9 @@ export class NodeSyncTransport implements V3Transport {
   close(): void {
     this.closedByUs = true;
     this.authed = false;
+    // 先确定性上报 onClose 再关 socket：僵尸连接的 close 握手永不完成，等 onclose 会让
+    // 宿主的重连永远不来（2026-08-16 188 实测：服务器重启后 CLI 持僵尸 ESTAB 离线 2 小时+）
+    this.notifyClose("closed locally");
     try {
       this.ws?.close(1000, "cli exit");
     } catch {
@@ -247,7 +288,7 @@ export function toSyncWsUrl(server: string, protobuf = false): string {
     count: String(Date.now() % 100000),
     client: CLIENT_TYPE,
     clientName: CLIENT_TYPE,
-    clientVersion: CLIENT_VERSION,
+    clientVersion: CLI_VERSION,
     protocol: protobuf ? "protobuf" : "json",
   });
   if (protobuf) {

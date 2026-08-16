@@ -29,9 +29,8 @@ import { V3SyncClient } from "../src/core/v3_client";
 import type { Scope, WSEnvelope } from "../src/core/types";
 import { NodeFSAdapter } from "./node_fs_adapter";
 import { scopeAllows } from "../src/core/scope";
-import { NodeSyncTransport, toSyncWsUrl, type TransportEvents } from "./node_transport";
+import { NodeSyncTransport, toSyncWsUrl, CLI_VERSION, type TransportEvents } from "./node_transport";
 
-const CLI_VERSION = "1.0.0";
 const STATE_DIR = ".fns";
 const STRATEGIES: ConflictStrategy[] = ["newest-wins", "server-wins", "local-wins", "copy"];
 
@@ -188,6 +187,33 @@ function tm2s(ms: number): string {
   return (ms / 1000).toFixed(1);
 }
 
+// ── 升级检测（服务端 ClientInfo 推送）────────────────────────────────────────
+
+/** 服务端 CheckVersionInfo 中 CLI 关心的字段（internal/app CheckVersion 组装） */
+interface ServerVersionInfo {
+  pluginVersionNewName?: string;
+  pluginVersionIsNew?: boolean;
+  pluginVersionNewLink?: string;
+}
+
+/**
+ * 解析 ClientInfo 版本推送并提示升级。CLI 与插件同仓库同 release，服务端在握手应答
+ * 与每轮版本检查（10 分钟）时按我们上报的 CLI_VERSION 对比最新插件 release——
+ * pluginVersionIsNew 即「CLI 有新版」结论，直接采用，本地不再做 semver 比较。
+ * 返回去重游标（最近已提示的版本号），宿主持有它防止 10 分钟广播反复刷屏。
+ */
+function announceUpgrade(env: WSEnvelope, last: string | null): string | null {
+  const d = (env.data ?? {}) as Partial<ServerVersionInfo>;
+  const v = d.pluginVersionNewName;
+  if (!d.pluginVersionIsNew || !v || v === last) return last;
+  process.stderr.write(
+    `[fns] upgrade available: ${v} (current ${CLI_VERSION})` +
+      (d.pluginVersionNewLink ? ` — ${d.pluginVersionNewLink}` : "") +
+      "\n"
+  );
+  return v;
+}
+
 // ── 装配：核心引擎 ───────────────────────────────────────────────────────────
 
 interface Assembled {
@@ -251,6 +277,8 @@ interface HostEvents {
   onClose?: (reason: string) => void;
   /** 其他客户端提交新 epoch（V3NotifyManifest） */
   onNotify?: () => void;
+  /** 服务端版本推送（连接握手应答 + 10 分钟广播，见 pkg/app/websocket.go ClientInfo） */
+  onVersionInfo?: (env: WSEnvelope) => void;
 }
 
 function assemble(cfg: CliConfig, host: HostEvents = {}, hashCache?: HashCache): Assembled {
@@ -272,8 +300,15 @@ function assemble(cfg: CliConfig, host: HostEvents = {}, hashCache?: HashCache):
     },
     log: (m, e) => log(cfg, m, e),
   });
-  // 环形依赖在此收口：transport 事件回调 → v3 客户端分发
-  events.onEnvelope = (action: string, env: WSEnvelope) => client.handleAction(action, env);
+  // 环形依赖在此收口：transport 事件回调 → v3 客户端分发。
+  // ClientInfo 是服务端版本推送（升级检测），单独拦给宿主，不进 v3 协议分发。
+  events.onEnvelope = (action: string, env: WSEnvelope) => {
+    if (action === "ClientInfo") {
+      host.onVersionInfo?.(env);
+      return;
+    }
+    client.handleAction(action, env);
+  };
 
   const a: Assembled = {
     cfg,
@@ -318,7 +353,12 @@ function buildScope(cfg: CliConfig): Scope | null {
 // ── 命令 ─────────────────────────────────────────────────────────────────────
 
 async function cmdSync(cfg: CliConfig, json: boolean): Promise<number> {
-  const a = assemble(cfg, {}, await loadHashCache(cfg.root));
+  let lastAnnounced: string | null = null;
+  const a = assemble(
+    cfg,
+    { onVersionInfo: (env) => (lastAnnounced = announceUpgrade(env, lastAnnounced)) },
+    await loadHashCache(cfg.root)
+  );
   try {
     await a.transport.ready();
   } catch (e) {
@@ -358,6 +398,8 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
     backoff: 1000,
     /** 连接代数：旧一代传输的 onClose 一律忽略，防止替换/并发重连时重连链分叉 */
     gen: 0,
+    /** 最近一次已提示的升级版本（ClientInfo 推送去重） */
+    announced: null as string | null,
     watcher: null as ReturnType<typeof watch> | null,
   };
   let a: Assembled = null as never;
@@ -392,13 +434,15 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
   };
   const connect = async (): Promise<void> => {
     if (state.stopped) return;
+    // 先换代再关旧传输：close() 现在会确定性同步上报 onClose，若关完才换代，
+    // 旧传输的 onClose 仍属「现役代」会误触发一次多余重连（重连链分叉）
+    const gen = ++state.gen;
     // 换新传输前先关旧传输：遗弃的未关闭 socket 会滞留 CLOSE-WAIT（fd 泄漏）
     if (a) {
       a.client.abortAll("transport replaced");
       a.transport.close();
     }
     // 反复重连需新传输实例（undici WebSocket 不可重开）
-    const gen = ++state.gen;
     const next = assemble(cfg, {
       onReady: () => {
         state.backoff = 1000;
@@ -413,6 +457,9 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
       },
       onNotify: () => {
         if (state.gen === gen) scheduleRun();
+      },
+      onVersionInfo: (env) => {
+        state.announced = announceUpgrade(env, state.announced);
       },
     }, hashCache);
     a = next;
