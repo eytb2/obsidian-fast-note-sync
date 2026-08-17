@@ -281,6 +281,28 @@ interface HostEvents {
   onVersionInfo?: (env: WSEnvelope) => void;
 }
 
+/** 文件级进度：TTY 单行刷新；输出重定向（systemd 追加日志）时降频——每 20 个
+ * 文件或 3 秒一行，否则 750 文件的首轮灌库会把 fns.log 刷成纯路径流。 */
+function makeOpProgress(isTTY: boolean) {
+  let lastStep = 0;
+  let lastTime = 0;
+  return (info: { phase: "apply" | "upload"; op: string; path: string; current: number; total: number }) => {
+    const arrow = info.phase === "upload" ? "↑" : "↓";
+    const now = Date.now();
+    if (isTTY) {
+      // \r 原地刷新；阶段收尾补换行，免得吞掉后续 summary 的行首
+      const tail = info.current === info.total ? "\n" : "";
+      process.stderr.write(`\r[2K${arrow} ${info.current}/${info.total} ${info.path}`.slice(0, 120) + tail);
+      return;
+    }
+    if (info.current === 1 || info.current === info.total || info.current - lastStep >= 20 || now - lastTime >= 3000) {
+      lastStep = info.current;
+      lastTime = now;
+      process.stderr.write(`[fns] ${arrow} ${info.current}/${info.total} ${info.path}\n`);
+    }
+  };
+}
+
 function assemble(cfg: CliConfig, host: HostEvents = {}, hashCache?: HashCache): Assembled {
   const { server, token, vault } = requireConnection(cfg);
   const fsAdapter = new NodeFSAdapter(cfg.root);
@@ -329,6 +351,7 @@ function assemble(cfg: CliConfig, host: HostEvents = {}, hashCache?: HashCache):
     onServerPathRejected: (p) => process.stderr.write(`[fns] server path rejected by local rules: ${p}\n`),
     log: (m, e) => log(cfg, m, e),
     hashCache: cache,
+    onOp: makeOpProgress(process.stderr.isTTY === true),
     onRound: (s) => {
       a.lastSummary = s;
       printRound(s);

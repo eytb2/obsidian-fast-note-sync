@@ -1,0 +1,51 @@
+name: CI
+
+# 普通 push / PR 的编译验证（release.yml 只在 manifest.json 版本变更时触发，
+# 日常代码推送此前完全没有 CI —— 2026-08-17 补）。无 actor 门禁。
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tsc -noEmit 先行：本地 esbuild 不查类型，CI 是唯一的类型闸门
+      - name: Typecheck + build plugin
+        run: pnpm build
+
+      - name: Build CLI
+        run: pnpm build:cli
+
+      - name: CLI smoke test
+        run: pnpm test:cli
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-build
+          path: |
+            main.js
+            dist/fns-cli.mjs
+          retention-days: 7
