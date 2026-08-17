@@ -317,6 +317,8 @@ export default {
   "ui.log.v3.no_changes": "無變化",
   "ui.log.v3.round_done": "同步完成：",
   "ui.log.v3.round_failed": "同步失敗",
+  "ui.log.v3.error_repeated": "連續失敗 ${count} 次",
+  "ui.log.v3.recovered": "已恢復（合併 ${count} 條重複失敗）",
   "ui.log.debug_title": "除錯日誌",
   "ui.log.clear": "清空日誌",
   "ui.log.copy_all": "複製全部",

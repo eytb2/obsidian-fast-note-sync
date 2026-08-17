@@ -317,6 +317,8 @@ export default {
   "ui.log.v3.no_changes": "変更なし",
   "ui.log.v3.round_done": "同期完了：",
   "ui.log.v3.round_failed": "同期失敗",
+  "ui.log.v3.error_repeated": "連続失敗 ${count} 回",
+  "ui.log.v3.recovered": "復旧（重複失敗 ${count} 件を統合）",
   "ui.log.debug_title": "デバッグログ",
   "ui.log.clear": "ログをクリア",
   "ui.log.copy_all": "すべてコピー",

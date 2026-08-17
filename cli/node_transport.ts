@@ -21,7 +21,7 @@ const CLIENT_TYPE = "FastNoteCLI";
  * manifest.json. The server compares it against the latest plugin release to
  * decide whether the CLI is outdated (ClientInfo push).
  */
-export const CLI_VERSION = "2.4.2";
+export const CLI_VERSION = "2.4.3";
 /** 握手（TCP 连通但服务端不回鉴权应答，或 SYN 被黑洞）兜底超时：ready() 必须在此时限内完成 */
 const HANDSHAKE_TIMEOUT_MS = 15_000;
 

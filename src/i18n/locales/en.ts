@@ -317,6 +317,8 @@ export default {
   "ui.log.v3.no_changes": "no changes",
   "ui.log.v3.round_done": "Sync finished:",
   "ui.log.v3.round_failed": "Sync failed",
+  "ui.log.v3.error_repeated": "failed ${count} times in a row",
+  "ui.log.v3.recovered": "recovered (${count} duplicate failures merged)",
   "ui.log.debug_title": "Debug Logs",
   "ui.log.clear": "Clear Log",
   "ui.log.copy_all": "Copy All",

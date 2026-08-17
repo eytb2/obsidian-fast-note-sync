@@ -23,6 +23,8 @@ import type FastSync from "../../../main";
 const RUN_DEBOUNCE_DEFAULT = 1500;
 const ERROR_RETRY_MS = 5000;
 const PERIODIC_TICK_MS = 5 * 60 * 1000;
+/** 连续同错误日志抑制窗口：窗口内静默计数，到点记一条带次数的进展（防断线重试链刷屏） */
+const DUP_ERROR_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_DYN_EXCLUDES = 5000;
 
 export class V3Controller {
@@ -40,6 +42,10 @@ export class V3Controller {
   private roundActive = false;
   private manualRound = false;
   private fadeTimer: number | null = null;
+  /** 连续错误抑制：上一条错误文本 / 连续次数 / 上次入日志时间 */
+  private lastErrorText = "";
+  private dupErrorCount = 0;
+  private lastErrorLoggedAt = 0;
 
   constructor(private readonly plugin: FastSync) {
     this.fs = new ObsidianFSAdapter(plugin.app, plugin);
@@ -238,29 +244,64 @@ export class V3Controller {
     if (s.deleted) parts.push(`✕${s.deleted}`);
     if (s.conflicts.length) parts.push(`⚠${s.conflicts.length}`);
     const tm = s.timing;
-    const msg =
+    let msg =
       (parts.length > 0 ? parts.join(" ") : $("ui.log.v3.no_changes")) +
       (tm ? ` · ${(tm.total / 1000).toFixed(1)}s (scan ${tm.scan}/net ${tm.sync}/up ${tm.upload}ms)` : "") +
       (s.error ? ` · ${s.error}` : "");
 
-    try {
-      SyncLogManager.getInstance().addLog(
-        s.error ? "error" : "info",
-        "V3SyncRound",
-        msg,
-        s.error ? "error" : "success",
-        s.conflicts[0]?.path,
-        this.plugin.settings.vault,
-      );
-    } catch (e) {
-      dump("[v3] sync log write failed", e);
+    // ── 连续错误抑制：断线期间重试链每 ~6s 失败一次，逐条入日志会把同步日志
+    // 视图刷成错误风暴 —— 同一错误只记首条，窗口内静默计数，到点记一条带连续
+    // 次数的进展；恢复时在成功轮上汇总被合并的条数（Notice 同步只弹首条）。
+    const now = Date.now();
+    let suppress = false;
+    let repeatCount = 0;
+    let recovered = 0;
+    if (s.error) {
+      if (s.error === this.lastErrorText) {
+        this.dupErrorCount++;
+        if (now - this.lastErrorLoggedAt < DUP_ERROR_LOG_INTERVAL_MS) {
+          suppress = true;
+        } else {
+          repeatCount = this.dupErrorCount;
+          this.lastErrorLoggedAt = now;
+        }
+      } else {
+        this.lastErrorText = s.error;
+        this.dupErrorCount = 1;
+        this.lastErrorLoggedAt = now;
+      }
+    } else if (this.lastErrorText) {
+      recovered = this.dupErrorCount;
+      this.lastErrorText = "";
+      this.dupErrorCount = 0;
+      this.lastErrorLoggedAt = 0;
+    }
+    if (repeatCount > 0) msg += ` · ${$("ui.log.v3.error_repeated", { count: repeatCount })}`;
+    if (recovered > 0) msg += ` · ${$("ui.log.v3.recovered", { count: recovered })}`;
+
+    if (!suppress) {
+      try {
+        SyncLogManager.getInstance().addLog(
+          s.error ? "error" : "info",
+          "V3SyncRound",
+          msg,
+          s.error ? "error" : "success",
+          s.conflicts[0]?.path,
+          this.plugin.settings.vault,
+        );
+      } catch (e) {
+        dump("[v3] sync log write failed", e);
+      }
     }
 
     if (s.error) {
-      // 错误永远可见（Notice + 状态栏常驻「同步失败」）
-      showSyncNotice(`${$("ui.log.v3.round_failed")}: ${s.error}`, 8000);
-      // 失败重试（有界：等下一个信号或周期 tick 都会再触发，这里只做一次近距重试）
-      if (!this.retryTimer) {
+      // 错误可见性：状态栏常驻「同步失败」+ 首条 Notice（重复轮不再打扰）
+      if (!suppress) showSyncNotice(`${$("ui.log.v3.round_failed")}: ${s.error}`, 8000);
+      // 失败重试（有界：等下一个信号或周期 tick 都会再触发，这里只做一次近距重试）。
+      // 连接级失败除外：ws 客户端自带指数退避重连，重连成功 statusListener(true)
+      // 会 scheduleRun —— 5s 近距重试在断线期间只会每 6s 制造一条重复错误。
+      const connLevel = /transport not connected|v3 aborted: ws closed/.test(s.error);
+      if (!connLevel && !this.retryTimer) {
         this.retryTimer = window.setTimeout(() => {
           this.retryTimer = null;
           this.scheduleRun();

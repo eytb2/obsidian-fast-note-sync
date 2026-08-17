@@ -317,6 +317,8 @@ export default {
   "ui.log.v3.no_changes": "변경 없음",
   "ui.log.v3.round_done": "동기화 완료:",
   "ui.log.v3.round_failed": "동기화 실패",
+  "ui.log.v3.error_repeated": "연속 실패 ${count}회",
+  "ui.log.v3.recovered": "복구됨(중복 실패 ${count}건 병합)",
   "ui.log.debug_title": "디버그 로그",
   "ui.log.clear": "로그 지우기",
   "ui.log.copy_all": "모두 복사",
