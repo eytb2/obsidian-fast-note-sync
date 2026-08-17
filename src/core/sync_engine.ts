@@ -27,6 +27,10 @@ import type {
   V3SyncRequest,
 } from "./types";
 
+/** 单轮看门狗上限：请求级 60s 超时覆盖不到宿主文件 API 的挂起
+ *  （如 Obsidian renderer 楔死时 vault 写入永不返回），超时强制拆轮防永久楔死 */
+const ROUND_WATCHDOG_MS = 10 * 60 * 1000;
+
 export interface RoundSummary {
   pulled: number;
   moved: number;
@@ -52,6 +56,9 @@ export interface SyncEngineOptions {
   conflictStrategy?: ConflictStrategy;
   resolver?: ConflictResolver;
   maxEpochRetries?: number;
+  /** 单轮看门狗超时（毫秒，缺省 10 分钟）：超时 abortAll 拆网络挂起并使本轮作废。
+   *  防的是 apply 阶段挂在宿主文件 API 上（无请求超时可依），running 永不复位。 */
+  roundTimeoutMs?: number;
   /**
    * 只拉不推轮次（只读用户）：应用服务器 ops、冲突一律服务器胜出，
    * 不上传不提交、不上送墓碑（本地删除会被服务器视为待拉回）。
@@ -113,22 +120,43 @@ export class SyncEngine {
     }
     this.running = true;
     return (async () => {
-      for (;;) {
-        this.pending = false;
-        try {
-          await this.round();
-        } catch (err) {
-          this.log("sync round failed", err);
-          this.opts.onRound?.({
-            pulled: 0, moved: 0, deleted: 0, conflicts: [], uploaded: 0,
-            committed: false, epoch: this.opts.baseline.epoch,
-            error: err instanceof Error ? err.message : String(err),
-          });
+      // running 复位必须 finally：catch 里 onRound 抛错或看门狗拆轮都不能永久楔死引擎
+      try {
+        for (;;) {
+          this.pending = false;
+          try {
+            await this.roundWithWatchdog();
+          } catch (err) {
+            this.log("sync round failed", err);
+            this.opts.onRound?.({
+              pulled: 0, moved: 0, deleted: 0, conflicts: [], uploaded: 0,
+              committed: false, epoch: this.opts.baseline.epoch,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+          if (!this.pending) break;
         }
-        if (!this.pending) break;
+      } finally {
+        this.running = false;
       }
-      this.running = false;
     })();
+  }
+
+  /** 看门狗包裹：超时先 abortAll（拆掉挂起的请求/分块下载，可能让轮自然结束），
+   *  再抛错走 run() 的常规失败路径（本轮作废、基线不动、onRound 上报）。
+   *  原轮次若在超时后才落定，其 settle 被静默忽略（僵尸写入幂等，下轮自愈）。 */
+  private roundWithWatchdog(): Promise<void> {
+    const timeoutMs = this.opts.roundTimeoutMs ?? ROUND_WATCHDOG_MS;
+    return new Promise<void>((resolve, reject) => {
+      const timer = globalThis.setTimeout(() => {
+        this.opts.client.abortAll("round watchdog");
+        reject(new Error(`round watchdog: round exceeded ${Math.round(timeoutMs / 60000)}min (host fs hang?)`));
+      }, timeoutMs);
+      this.round().then(
+        () => { globalThis.clearTimeout(timer); resolve(); },
+        (err) => { globalThis.clearTimeout(timer); reject(err); },
+      );
+    });
   }
 
   /** 一轮同步（含 542 重试） */
