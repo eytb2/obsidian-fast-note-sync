@@ -314,6 +314,7 @@ export default {
   // --- ui.log ---
   "ui.log.title": "同步日志",
   "ui.log.action.V3SyncRound": "同步轮次（v3）",
+  "ui.log.action.V3FileSync": "文件同步",
   "ui.log.v3.no_changes": "无变化",
   "ui.log.v3.round_done": "同步完成：",
   "ui.log.v3.round_failed": "同步失败",

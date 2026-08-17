@@ -26,6 +26,18 @@ export class EventManager {
     return this.plugin.settings.syncEngineVersion === "v3" && !!this.plugin.v3Controller
   }
 
+  /** 自身写入过滤：插件自己目录（sync.log / temp-chunks / 哈希表）与 .fns/ 状态目录
+   *  的文件变动都是轮次的副作用。不过滤会形成「写日志 → 事件 → 跑轮 → 再写日志」
+   *  的自激励死循环（2026-08-18 实测：桌面端每 ~4s 一轮背靠背数小时，
+   *  vault 永不安静，Obsidian「正在索引」永不清空）。 */
+  private isSelfWrite(path: string): boolean {
+    const p = path.replace(/\\/g, "/")
+    const configDir = this.plugin.app.vault.configDir.replace(/\\/g, "/")
+    const ownDir = `${configDir}/plugins/${this.plugin.manifest.id}/`
+    if (p === ownDir.slice(0, -1) || p.startsWith(ownDir)) return true
+    return p.split("/").includes(".fns")
+  }
+
   public registerEvents() {
     // v3 引擎不依赖旧哈希表（扫描现算 + mtime/size 预过滤缓存）
     if (!this.isV3()) {
@@ -150,6 +162,7 @@ export class EventManager {
 
     // v3：内容变化只做信号——扫描现算哈希，无需逐文件组包（重命名伴随的 modify 同样无害）
     if (this.isV3()) {
+      if (this.isSelfWrite(file.path)) return
       this.plugin.v3Controller?.notifyLocalChange()
       return
     }
@@ -182,6 +195,7 @@ export class EventManager {
 
     // v3：立即记墓碑（离线删除上报依赖身份映射），防抖跑整轮
     if (this.isV3()) {
+      if (this.isSelfWrite(file.path)) return
       this.plugin.v3Controller?.notifyLocalDelete(file.path)
       return
     }
@@ -209,6 +223,7 @@ export class EventManager {
     // v3：立即迁移基线身份映射（move-by-id 检测依赖）；扩展名变更无需特判——
     // 内容寻址哈希不变即 move，变了服务器按 delete+add 自然收敛
     if (this.isV3()) {
+      if (this.isSelfWrite(oldFile) || this.isSelfWrite(file.path)) return
       this.plugin.v3Controller?.notifyLocalRename(oldFile, file.path)
       return
     }
@@ -280,6 +295,8 @@ export class EventManager {
 
   private watchRaw = (path: string, ctx?: unknown) => {
     if (!path) return
+    // 自身写入不触发同步（sync.log 每轮都写，raw 事件对 .obsidian/ 全放行）
+    if (this.isSelfWrite(path)) return
 
     // 检查 WebSocket 认证状态
     if (!this.plugin.websocket || !this.plugin.websocket.isAuth) {

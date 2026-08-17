@@ -314,6 +314,7 @@ export default {
   // --- ui.log ---
   "ui.log.title": "Sync Log",
   "ui.log.action.V3SyncRound": "Sync Round (v3)",
+  "ui.log.action.V3FileSync": "File sync",
   "ui.log.v3.no_changes": "no changes",
   "ui.log.v3.round_done": "Sync finished:",
   "ui.log.v3.round_failed": "Sync failed",

@@ -119,6 +119,7 @@ jobs:
         run: |
           pnpm install
           pnpm run build
+          pnpm run build:cli
           # 使用 fast-note-sync 作为文件夹名，移除 obsidian- 前缀
           PKG_NAME="fast-note-sync"
           mkdir ${PKG_NAME}
@@ -149,6 +150,7 @@ jobs:
             main.js
             manifest.json
             styles.css
+            dist/fns-cli.mjs
             # changelog.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,4 +163,5 @@ jobs:
             main.js
             manifest.json
             styles.css
+            dist/fns-cli.mjs
 

@@ -314,6 +314,7 @@ export default {
   // --- ui.log ---
   "ui.log.title": "동기화 로그",
   "ui.log.action.V3SyncRound": "동기화 라운드(v3)",
+  "ui.log.action.V3FileSync": "파일 동기화",
   "ui.log.v3.no_changes": "변경 없음",
   "ui.log.v3.round_done": "동기화 완료:",
   "ui.log.v3.round_failed": "동기화 실패",

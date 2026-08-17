@@ -16,10 +16,10 @@
  * 配置优先级：命令行 > 环境变量(FNS_SERVER/FNS_TOKEN/FNS_VAULT/FNS_ROOT) > <root>/.fns/config.json
  * 要求 Node ≥ 22（内置 WebSocket）。
  */
-import { promises as fs } from "node:fs";
+import { promises as fs, chmodSync, renameSync, writeFileSync, watch } from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { watch } from "node:fs";
+import { spawn } from "node:child_process";
 
 import { BaselineStore, type BaselinePersist } from "../src/core/baseline";
 import { decide, type ConflictStrategy } from "../src/core/conflict";
@@ -212,6 +212,67 @@ function announceUpgrade(env: WSEnvelope, last: string | null): string | null {
       "\n"
   );
   return v;
+}
+
+/**
+ * 自动升级：直连 GitHub release 优先，失败（局域网客户端常直连不了 GitHub，
+ * x98h 实测超时）再走服务器中转 /api/upgrade/cli（服务器代取并缓存）。
+ * 流程：下载 → 校验（体积下限 + 文件头特征，防错误页/HTML 被当成本体）→
+ * 写临时文件 → 原子 rename 覆盖自身 → 分离拉起新进程（宿主返回后 exit）。
+ * FNS_NO_AUTO_UPGRADE=1 可关闭；非单文件部署（process.argv[1] 非 .mjs）不动。
+ */
+async function selfUpgrade(cfg: CliConfig, version: string): Promise<boolean> {
+  if (process.env.FNS_NO_AUTO_UPGRADE === "1") return false;
+  const self = process.argv[1];
+  if (!self || !self.endsWith(".mjs")) return false;
+  const base = cfg.server.replace(/^ws/, "http").replace(/\/+$/, "");
+  const sources: Array<{ url: string; headers: Record<string, string>; tag: string }> = [
+    {
+      url: `https://github.com/eytb2/obsidian-fast-note-sync/releases/download/${version}/fns-cli.mjs`,
+      headers: {},
+      tag: "github direct",
+    },
+    {
+      url: `${base}/api/upgrade/cli?version=${encodeURIComponent(version)}`,
+      headers: { token: cfg.token },
+      tag: "server relay",
+    },
+  ];
+  let bytes: Uint8Array | null = null;
+  let lastErr: unknown = null;
+  for (const src of sources) {
+    try {
+      const res = await fetch(src.url, { headers: src.headers, signal: AbortSignal.timeout(30_000) });
+      if (!res.ok) throw new Error(`${src.tag} responded ${res.status}`);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (buf.length < 100_000) throw new Error(`${src.tag} suspicious payload: ${buf.length} bytes`);
+      // 特征校验：usage 文本里的 "fns-cli" 在压缩产物中位置靠后（实测 ~93% 处），须全文扫描
+      if (!new TextDecoder().decode(buf).includes("fns-cli")) {
+        throw new Error(`${src.tag} payload is not the fns-cli bundle`);
+      }
+      bytes = buf;
+      break;
+    } catch (e) {
+      lastErr = e;
+      process.stderr.write(`[fns] upgrade via ${src.tag} failed: ${e instanceof Error ? e.message : e}\n`);
+    }
+  }
+  if (!bytes) throw lastErr instanceof Error ? lastErr : new Error("all upgrade sources failed");
+  const tmp = self + ".upgrade";
+  writeFileSync(tmp, bytes);
+  chmodSync(tmp, 0o755);
+  renameSync(tmp, self);
+  process.stderr.write(`[fns] auto-upgraded to ${version}; restarting\n`);
+  // 分离重启：新进程接管 watch；旧进程随即退出（systemd 常驻场景应设 FNS_NO_AUTO_UPGRADE=1
+  // 防止与重启策略叠加双开）
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    detached: true,
+    stdio: "inherit",
+    cwd: process.cwd(),
+    env: process.env,
+  });
+  child.unref();
+  return true;
 }
 
 // ── 装配：核心引擎 ───────────────────────────────────────────────────────────
@@ -423,6 +484,8 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
     gen: 0,
     /** 最近一次已提示的升级版本（ClientInfo 推送去重） */
     announced: null as string | null,
+    /** 已尝试过自动升级的版本（失败不重试同一版本，等下次进程重启） */
+    attempted: null as string | null,
     watcher: null as ReturnType<typeof watch> | null,
   };
   let a: Assembled = null as never;
@@ -455,6 +518,24 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
     state.backoff = Math.min(state.backoff * 2, 30000);
     globalThis.setTimeout(() => void connect(), wait);
   };
+  // 检测到新版 → 自动升级（成功替换自身后拉起新进程并退出本进程）
+  const attemptUpgrade = (): void => {
+    const target = state.announced;
+    if (!target || target === state.attempted) return;
+    state.attempted = target;
+    void selfUpgrade(cfg, target)
+      .then((done) => {
+        if (!done) return;
+        state.stopped = true;
+        a?.client.abortAll("upgrading");
+        a?.transport.close();
+        state.watcher?.close();
+        process.exit(0);
+      })
+      .catch((e) =>
+        process.stderr.write(`auto-upgrade failed: ${e instanceof Error ? e.message : e}\n`)
+      );
+  };
   const connect = async (): Promise<void> => {
     if (state.stopped) return;
     // 先换代再关旧传输：close() 现在会确定性同步上报 onClose，若关完才换代，
@@ -483,6 +564,7 @@ async function cmdWatch(cfg: CliConfig): Promise<number> {
       },
       onVersionInfo: (env) => {
         state.announced = announceUpgrade(env, state.announced);
+        attemptUpgrade();
       },
     }, hashCache);
     a = next;

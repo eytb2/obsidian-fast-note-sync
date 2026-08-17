@@ -46,6 +46,9 @@ export class V3Controller {
   private lastErrorText = "";
   private dupErrorCount = 0;
   private lastErrorLoggedAt = 0;
+  /** 逐文件日志节流（onOp）：上次落日志的序号 / 时间 */
+  private opLogStep = 0;
+  private opLogTime = 0;
 
   constructor(private readonly plugin: FastSync) {
     this.fs = new ObsidianFSAdapter(plugin.app, plugin);
@@ -90,6 +93,28 @@ export class V3Controller {
         const base = info.path.split("/").pop() || info.path;
         const arrow = info.phase === "upload" ? "↑" : info.op === "delete" ? "✕" : info.op === "move" ? "→" : "↓";
         this.plugin.updateStatusBar(`${arrow} ${base}`, info.current, info.total);
+        // 逐文件进度落同步日志视图（节流：首条/末条/每 20 个/每 3s，与 CLI 同规则）：
+        // 大批量拉取/上传时可见推进过程，又不至于刷屏
+        const now = Date.now();
+        if (
+          info.current === 1 || info.current === info.total ||
+          info.current - this.opLogStep >= 20 || now - this.opLogTime >= 3000
+        ) {
+          this.opLogStep = info.current;
+          this.opLogTime = now;
+          try {
+            SyncLogManager.getInstance().addLog(
+              "info",
+              "V3FileSync",
+              `${arrow} ${info.current}/${info.total} ${info.path}`,
+              "success",
+              info.path,
+              vaultName(),
+            );
+          } catch {
+            /* 日志失败不碍同步 */
+          }
+        }
       },
     });
   }
