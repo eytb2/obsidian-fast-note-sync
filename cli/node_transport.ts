@@ -13,7 +13,7 @@ import type { V3Transport } from "../src/core/v3_client";
 import type { WSEnvelope } from "../src/core/types";
 import { enSendDTOToProtobuf, deReceivePacket } from "../src/pb/protobuf_mapper";
 
-const CLIENT_TYPE = "FastNoteCLI";
+export const CLIENT_TYPE = "FastNoteCLI";
 /**
  * CLI 与插件同仓库同 release 分发，版本号跟随插件 manifest.json（发版时同步改）。
  * 服务端 CheckVersion 用它对比插件最新 release 判定 CLI 是否需要升级（ClientInfo 推送）。

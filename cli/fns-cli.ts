@@ -29,7 +29,7 @@ import { V3SyncClient } from "../src/core/v3_client";
 import type { Scope, WSEnvelope } from "../src/core/types";
 import { NodeFSAdapter } from "./node_fs_adapter";
 import { scopeAllows } from "../src/core/scope";
-import { NodeSyncTransport, toSyncWsUrl, CLI_VERSION, type TransportEvents } from "./node_transport";
+import { NodeSyncTransport, toSyncWsUrl, CLI_VERSION, CLIENT_TYPE, type TransportEvents } from "./node_transport";
 
 const STATE_DIR = ".fns";
 const STRATEGIES: ConflictStrategy[] = ["newest-wins", "server-wins", "local-wins", "copy"];
@@ -218,7 +218,8 @@ function announceUpgrade(env: WSEnvelope, last: string | null): string | null {
  * 自动升级：直连 GitHub release 优先，失败（局域网客户端常直连不了 GitHub，
  * x98h 实测超时）再走服务器中转 /api/upgrade/cli（服务器代取并缓存）。
  * 流程：下载 → 校验（体积下限 + 文件头特征，防错误页/HTML 被当成本体）→
- * 写临时文件 → 原子 rename 覆盖自身 → 分离拉起新进程（宿主返回后 exit）。
+ * 写临时文件 → 原子 rename 覆盖自身 → 重启（systemd 托管下退出交 Restart 策略拉起，
+ * 裸跑则分离拉起新进程，宿主返回后 exit）。
  * FNS_NO_AUTO_UPGRADE=1 可关闭；非单文件部署（process.argv[1] 非 .mjs）不动。
  */
 async function selfUpgrade(cfg: CliConfig, version: string): Promise<boolean> {
@@ -234,7 +235,8 @@ async function selfUpgrade(cfg: CliConfig, version: string): Promise<boolean> {
     },
     {
       url: `${base}/api/upgrade/cli?version=${encodeURIComponent(version)}`,
-      headers: { token: cfg.token },
+      // token 与 WS 握手同源；X-Client 必须匹配 token 绑定的客户端类型（314 拦截）
+      headers: { token: cfg.token, "X-Client": CLIENT_TYPE, "X-Client-Version": CLI_VERSION },
       tag: "server relay",
     },
   ];
@@ -262,9 +264,14 @@ async function selfUpgrade(cfg: CliConfig, version: string): Promise<boolean> {
   writeFileSync(tmp, bytes);
   chmodSync(tmp, 0o755);
   renameSync(tmp, self);
+  if (process.env.INVOCATION_ID) {
+    // systemd 托管（user/system 单元均会注入 INVOCATION_ID）：不自行拉子进程，
+    // 退出后 Restart=always 会用新二进制拉起——自拉会与重启策略叠加双开
+    process.stderr.write(`[fns] auto-upgraded to ${version}; exiting for service restart\n`);
+    return true;
+  }
   process.stderr.write(`[fns] auto-upgraded to ${version}; restarting\n`);
-  // 分离重启：新进程接管 watch；旧进程随即退出（systemd 常驻场景应设 FNS_NO_AUTO_UPGRADE=1
-  // 防止与重启策略叠加双开）
+  // 裸跑（nohup/手动）：分离拉起新进程接管 watch，旧进程随即退出
   const child = spawn(process.execPath, process.argv.slice(1), {
     detached: true,
     stdio: "inherit",
