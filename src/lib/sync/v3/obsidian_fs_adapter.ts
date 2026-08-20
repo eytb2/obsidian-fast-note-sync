@@ -32,14 +32,8 @@ export class ObsidianFSAdapter implements LocalFSAdapter {
     return !isPathExcluded(path.replace(/\\/g, "/"), this.plugin);
   }
 
-  /** 大小上限（设置：笔记/附件分别限制 + 128MB 二进制总限） */
-  sizeAllowed(size: number, isNote: boolean): boolean {
-    const s = this.plugin.settings;
-    const mb = 1024 * 1024;
-    if (s.binarySyncLimitEnabled && size > 128 * mb) return false;
-    const limit = (isNote ? s.noteSyncLimit : s.attachmentSyncLimit) || 0;
-    return limit <= 0 || size <= limit * mb;
-  }
+  // 大小上限已移除：v3 走分段上传，大文件（数百 MB 附件）不再过滤；
+  // 旧的 binarySyncLimit/attachmentSyncLimit/noteSyncLimit 设置项仅存于遗留 v1/v2 路径
 
   async list(): Promise<LocalFileMeta[]> {
     const out: LocalFileMeta[] = [];
@@ -111,7 +105,6 @@ export class ObsidianFSAdapter implements LocalFSAdapter {
       try {
         const stat = await adapter.stat(path);
         if (!stat || stat.type !== "file") continue;
-        if (!this.sizeAllowed(stat.size, isNote)) continue;
         out.push({ path, size: stat.size, mtime: stat.mtime, isNote });
         seen.add(path);
       } catch {

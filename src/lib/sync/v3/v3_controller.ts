@@ -90,8 +90,7 @@ export class V3Controller {
       resolver: (ctx) => decide(this.plugin.settings.v3ConflictStrategy ?? "newest-wins", ctx),
       // 只读用户：只拉不推轮（服务器 ops 照常应用，冲突一律服务器胜出，不上传不提交）
       pullOnly: () => this.plugin.settings.readonlySyncEnabled === true,
-      allowPath: (path, isNote, size) =>
-        this.fs.isPathAllowed(path, isNote) && (size === undefined || this.fs.sizeAllowed(size, isNote)),
+      allowPath: (path, isNote) => this.fs.isPathAllowed(path, isNote),
       onServerPathRejected: (path) => this.addDynExclude(path),
       log: (msg, err) => dump("[v3] " + msg, err),
       onRound: (s) => this.onRound(s),

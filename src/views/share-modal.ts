@@ -15,7 +15,7 @@ export class ShareModal extends Modal {
     private plugin: FastSync;
     private path: string;
     private loading: boolean = false;
-    private shareData: { id: number, token: string, isPassword?: boolean, shortLink?: string, baseUrl?: string, expiresAt?: string } | null = null;
+    private shareData: { entryId?: string, id: number, token: string, isPassword?: boolean, shortLink?: string, baseUrl?: string, expiresAt?: string } | null = null;
 
     // 密码状态相关
     private isPasswordVisible: boolean = false;
@@ -183,7 +183,10 @@ export class ShareModal extends Modal {
         linkHeader.createSpan({ text: $("ui.share.link"), cls: "fns-header-title" });
 
         const apiBase = this.shareData?.baseUrl || (this.plugin.runApi || this.plugin.settings.api).replace(/\/+$/, "");
-        const shareUrl = `${apiBase}/share/${this.shareData?.id}/${this.shareData?.token}`;
+        // v3 分享 URL 的 rid 段是条目 UUID（服务端 create 响应里 id 恒为 0，真实标识在 entryId）；
+        // 旧服务端无 entryId 时回退 id
+        const shareRid = this.shareData?.entryId || this.shareData?.id;
+        const shareUrl = `${apiBase}/share/${shareRid}/${this.shareData?.token}`;
 
         const linkActionGroup = linkSection.createDiv("fns-share-input-group");
         
