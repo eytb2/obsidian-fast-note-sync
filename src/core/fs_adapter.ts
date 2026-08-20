@@ -31,6 +31,9 @@ export interface LocalFSAdapter {
    * 不在 vault 索引内的路径（如 .obsidian）退回 adapter.rename。
    */
   rename(from: string, to: string): Promise<void>;
+  /** 取文件元数据（可选）。引擎在拉取落盘后取 mtime 把服务器哈希种进缓存，
+   *  免下一轮重读重算刚下载的内容；实现缺失/文件不存在返回 null 即可。 */
+  stat?(path: string): Promise<{ mtime: number; size?: number } | null>;
 }
 
 /** 隔离区条目保留时长（7 天后由 purgeTrash 清理） */

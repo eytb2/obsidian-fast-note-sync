@@ -322,6 +322,7 @@ export const configIsPathExcluded = function (relativePath: string, plugin: Fast
     normalizedPath === `${pluginSelfDir}/fileHashMap.json` ||
     normalizedPath === `${pluginSelfDir}/syncHashMap.json` ||
     normalizedPath === `${pluginSelfDir}/folderSnapshot.json` ||
+    normalizedPath === `${pluginSelfDir}/v3HashCache.json` ||
     normalizedPath === `${pluginSelfDir}/conflict-notes` ||
     normalizedPath.startsWith(`${pluginSelfDir}/conflict-notes/`)
   ) {

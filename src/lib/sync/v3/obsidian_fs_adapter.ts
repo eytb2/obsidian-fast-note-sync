@@ -171,6 +171,15 @@ export class ObsidianFSAdapter implements LocalFSAdapter {
     }
   }
 
+  async stat(path: string): Promise<{ mtime: number; size?: number } | null> {
+    try {
+      const s = await this.app.vault.adapter.stat(normalizePath(path));
+      return s && s.type === "file" ? { mtime: s.mtime, size: s.size } : null;
+    } catch {
+      return null;
+    }
+  }
+
   async purgeTrash(maxAgeMs: number): Promise<void> {
     const adapter = this.app.vault.adapter;
     const trash = normalizePath(TRASH_DIR);

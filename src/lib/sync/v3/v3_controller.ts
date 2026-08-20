@@ -15,7 +15,7 @@ import { SyncEngine, type RoundSummary } from "../../../core/sync_engine";
 import { V3SyncClient, type V3Transport } from "../../../core/v3_client";
 import type { Scope, WSEnvelope } from "../../../core/types";
 import { ObsidianFSAdapter } from "./obsidian_fs_adapter";
-import { getConfigSyncCustomDirs, parseRules, dump, showSyncNotice } from "../../utils/helpers";
+import { getConfigSyncCustomDirs, getPluginDir, parseRules, dump, showSyncNotice } from "../../utils/helpers";
 import { SyncLogManager } from "../sync_log_manager";
 import { $ } from "../../../i18n/lang";
 import type FastSync from "../../../main";
@@ -26,6 +26,10 @@ const PERIODIC_TICK_MS = 5 * 60 * 1000;
 /** 连续同错误日志抑制窗口：窗口内静默计数，到点记一条带次数的进展（防断线重试链刷屏） */
 const DUP_ERROR_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_DYN_EXCLUDES = 5000;
+/** 哈希缓存落盘节拍：冷扫描长达数分钟（移动端 2GB 全量哈希 7-10min），
+ *  周期性把 dirty 缓存写盘——App 中途被杀也只损失一个节拍内的哈希进度，
+ *  下次启动免全量重算（否则移动端永远卡在冷扫描→看门狗拆轮的死循环里） */
+const HASH_CACHE_FLUSH_MS = 30 * 1000;
 
 export class V3Controller {
   readonly fs: ObsidianFSAdapter;
@@ -37,6 +41,9 @@ export class V3Controller {
   private debounceTimer: number | null = null;
   private retryTimer: number | null = null;
   private tickTimer: number | null = null;
+  /** 哈希缓存周期落盘计时器 + 写盘互斥（防重叠写） */
+  private hashCacheTimer: number | null = null;
+  private hashCacheSaving = false;
   private statusListener: ((status: boolean) => void) | null = null;
   /** UI：轮次进行中标记 / 完成态淡出计时 / 手动轮（完成时弹 Notice） */
   private roundActive = false;
@@ -124,6 +131,8 @@ export class V3Controller {
   async start(): Promise<void> {
     await this.baseline.load();
     this.loadDynExcludes();
+    await this.loadHashCache();
+    this.hashCacheTimer = window.setInterval(() => void this.persistHashCache(), HASH_CACHE_FLUSH_MS);
     // WS 分发钩子：V3* 动作与裸错误帧优先走 v3 客户端
     this.plugin.websocket.v3Dispatch = (action: string, data: unknown) =>
       this.client.handleAction(action, data as WSEnvelope);
@@ -147,9 +156,48 @@ export class V3Controller {
     if (this.retryTimer) window.clearTimeout(this.retryTimer);
     if (this.tickTimer) window.clearInterval(this.tickTimer);
     if (this.fadeTimer) window.clearTimeout(this.fadeTimer);
+    if (this.hashCacheTimer) window.clearInterval(this.hashCacheTimer);
     if (this.statusListener) this.plugin.websocket.removeStatusListener(this.statusListener);
     if (this.plugin.websocket.v3Dispatch) this.plugin.websocket.v3Dispatch = null;
     this.client.abortAll("controller stopped");
+    // 卸载兜底：dirty 缓存同步写盘（onunload 路径，容许一次阻塞式落盘）
+    if (this.engine.hashCache.isDirty) void this.persistHashCache();
+  }
+
+  // ── 哈希缓存持久化（插件目录 v3HashCache.json，硬排除于配置同步）─────────
+
+  private hashCacheFile(): string {
+    return `${getPluginDir(this.plugin)}/v3HashCache.json`;
+  }
+
+  private async loadHashCache(): Promise<void> {
+    try {
+      const path = this.hashCacheFile();
+      if (await this.plugin.app.vault.adapter.exists(path)) {
+        const raw = new TextDecoder().decode(await this.plugin.app.vault.adapter.readBinary(path));
+        const n = this.engine.hashCache.loadJSON(JSON.parse(raw));
+        this.engine.hashCache.markClean();
+        dump(`[v3] hash cache loaded: ${n} entries`);
+      }
+    } catch (e) {
+      dump("[v3] hash cache load failed (cold scan this session)", e);
+    }
+  }
+
+  private async persistHashCache(): Promise<void> {
+    const cache = this.engine.hashCache;
+    if (!cache.isDirty || this.hashCacheSaving) return;
+    this.hashCacheSaving = true;
+    try {
+      // 先序列化再标 clean：落盘期间新产生的 dirty 不会丢（下个节拍补写）
+      const json = JSON.stringify(cache.toJSON());
+      cache.markClean();
+      await this.plugin.app.vault.adapter.write(this.hashCacheFile(), json);
+    } catch (e) {
+      dump("[v3] hash cache persist failed", e);
+    } finally {
+      this.hashCacheSaving = false;
+    }
   }
 
   // ── 信号入口（EventManager / 手动同步）────────────────────────────────────
@@ -250,6 +298,8 @@ export class V3Controller {
   }
 
   private onRound(s: RoundSummary): void {
+    // 轮末（含看门狗拆轮的错误轮）落盘哈希缓存：被拆的冷扫描轮已算出的哈希不浪费
+    void this.persistHashCache();
     dump(
       `[v3] round done: pulled=${s.pulled} moved=${s.moved} deleted=${s.deleted} ` +
         `conflicts=${s.conflicts.length} uploaded=${s.uploaded} committed=${s.committed} epoch=${s.epoch}` +

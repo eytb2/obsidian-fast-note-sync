@@ -27,9 +27,13 @@ import type {
   V3SyncRequest,
 } from "./types";
 
-/** 单轮看门狗上限：请求级 60s 超时覆盖不到宿主文件 API 的挂起
- *  （如 Obsidian renderer 楔死时 vault 写入永不返回），超时强制拆轮防永久楔死 */
-const ROUND_WATCHDOG_MS = 10 * 60 * 1000;
+/** 单轮看门狗「无进展」超时：请求级 60s 超时覆盖不到宿主文件 API 的挂起
+ *  （如 Obsidian renderer 楔死时 vault 写入永不返回），超时强制拆轮防永久楔死。
+ *  语义是 idle 而非整轮时长（2.4.4 起初版为整轮 10min 上限）：移动端冷扫描全量
+ *  哈希 2GB 可达 7-10min，大批拉取 9000+ 文件更要 30min+——只要引擎在持续
+ *  beat（每哈希/应用/上传一个文件），就不该拆轮；挂死的 await 不再 beat，
+ *  idle 超时照掐。 */
+const ROUND_WATCHDOG_IDLE_MS = 10 * 60 * 1000;
 
 export interface RoundSummary {
   pulled: number;
@@ -56,8 +60,9 @@ export interface SyncEngineOptions {
   conflictStrategy?: ConflictStrategy;
   resolver?: ConflictResolver;
   maxEpochRetries?: number;
-  /** 单轮看门狗超时（毫秒，缺省 10 分钟）：超时 abortAll 拆网络挂起并使本轮作废。
-   *  防的是 apply 阶段挂在宿主文件 API 上（无请求超时可依），running 永不复位。 */
+  /** 单轮看门狗「无进展」超时（毫秒，缺省 10 分钟）：持续无 beat（既无扫描哈希、
+   *  也无应用/上传动作）达此时长，abortAll 拆网络挂起并使本轮作废。
+   *  防的是宿主文件 API 挂起（无请求超时可依），running 永不复位；活跃轮不限总时长。 */
   roundTimeoutMs?: number;
   /**
    * 只拉不推轮次（只读用户）：应用服务器 ops、冲突一律服务器胜出，
@@ -99,6 +104,8 @@ export class SyncEngine {
   private pending = false;
   /** 离线删除推断的连续未见计数（path → 已连续未见的轮数；重启归零，宁可重计） */
   private missStreak = new Map<string, number>();
+  /** 看门狗打点（仅轮次进行中非空）：扫描/应用/上传每动作一次，重置 idle 计时 */
+  private beat: (() => void) | null = null;
 
   constructor(private readonly opts: SyncEngineOptions) {
     this.hashCache = opts.hashCache ?? new HashCache();
@@ -142,19 +149,34 @@ export class SyncEngine {
     })();
   }
 
-  /** 看门狗包裹：超时先 abortAll（拆掉挂起的请求/分块下载，可能让轮自然结束），
+  /** 看门狗包裹：idle 语义（见 ROUND_WATCHDOG_IDLE_MS 注释）——每 beat 重置计时器；
+   *  持续 idle 超时先 abortAll（拆掉挂起的请求/分块下载，可能让轮自然结束），
    *  再抛错走 run() 的常规失败路径（本轮作废、基线不动、onRound 上报）。
    *  原轮次若在超时后才落定，其 settle 被静默忽略（僵尸写入幂等，下轮自愈）。 */
   private roundWithWatchdog(): Promise<void> {
-    const timeoutMs = this.opts.roundTimeoutMs ?? ROUND_WATCHDOG_MS;
+    const idleMs = this.opts.roundTimeoutMs ?? ROUND_WATCHDOG_IDLE_MS;
     return new Promise<void>((resolve, reject) => {
-      const timer = globalThis.setTimeout(() => {
-        this.opts.client.abortAll("round watchdog");
-        reject(new Error(`round watchdog: round exceeded ${Math.round(timeoutMs / 60000)}min (host fs hang?)`));
-      }, timeoutMs);
+      let timer: ReturnType<typeof globalThis.setTimeout> | null = null;
+      let settled = false;
+      const arm = () => {
+        if (timer !== null) globalThis.clearTimeout(timer);
+        timer = globalThis.setTimeout(() => {
+          this.opts.client.abortAll("round watchdog");
+          reject(new Error(`round watchdog: no progress for ${Math.round(idleMs / 60000)}min (host fs hang?)`));
+        }, idleMs);
+      };
+      this.beat = arm; // 本轮内扫描/应用/上传各动作回调打点
+      arm();
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        this.beat = null;
+        if (timer !== null) globalThis.clearTimeout(timer);
+        fn();
+      };
       this.round().then(
-        () => { globalThis.clearTimeout(timer); resolve(); },
-        (err) => { globalThis.clearTimeout(timer); reject(err); },
+        () => settle(() => resolve()),
+        (err) => settle(() => reject(err)),
       );
     });
   }
@@ -246,11 +268,13 @@ export class SyncEngine {
       scope,
     };
     const { plan, needs, pages } = await client.requestSync(syncReq);
+    this.beat?.();
     t.sync = Date.now() - t0 - t.scan;
 
     // ── 3. 应用服务器 ops（pull / move / delete）────────────────────────────
     let opIndex = 0;
     for (const op of plan.ops) {
+      this.beat?.();
       const item = op.item;
       // scope 外的 op 一律跳过：扫描器看不见的路径（如 CLI 的隐藏目录）若经 pull
       // 进入基线，离线删除推断会在下一轮把它墓碑掉——形成「pull→tombstone→误删」
@@ -270,7 +294,7 @@ export class SyncEngine {
           const data = await this.readServerBlob(vault, item, pages);
           await fs.writeBinary(item.path, data);
           baseline.learnId(item.path, item.id);
-          this.hashCache.drop(item.path);
+          await this.seedHashCache(fs, item.path, item.hash, data.byteLength);
           summary.pulled++;
           break;
         }
@@ -302,6 +326,7 @@ export class SyncEngine {
     const changes: Change[] = [];
     const conflictUploads: ManifestItem[] = [];
     for (const conflict of plan.conflicts) {
+      this.beat?.();
       const localItem = localByPath.get(conflict.path);
       if (!localItem) continue; // 本地已消失（本轮被 op 覆盖等）：跳过，下一轮收敛
       // scope 外的冲突同 ops：跳过（不写文件、不学 id——理由见 ops 过滤）
@@ -323,7 +348,7 @@ export class SyncEngine {
         const data = await this.readServerBlob(vault, { ...localItem, hash: conflict.serverHash }, pages);
         await fs.writeBinary(conflict.path, data);
         baseline.learnId(conflict.path, conflict.id);
-        this.hashCache.drop(conflict.path);
+        await this.seedHashCache(fs, conflict.path, conflict.serverHash, data.byteLength);
         summary.conflicts.push(record);
         continue;
       }
@@ -361,6 +386,7 @@ export class SyncEngine {
     const uploadTotal = needs.length + conflictUploads.length;
     let uploadIndex = 0;
     for (const need of needs) {
+      this.beat?.();
       if (uploadedHashes.has(need.hash)) continue;
       const item = localByPath.get(need.path);
       if (!item) continue; // 扫描后又被删：跳过，下一轮收敛
@@ -370,6 +396,7 @@ export class SyncEngine {
       summary.uploaded++;
     }
     for (const item of conflictUploads) {
+      this.beat?.();
       if (uploadedHashes.has(item.hash)) continue;
       this.opts.onOp?.({ phase: "upload", op: "upload", path: item.path, current: ++uploadIndex, total: uploadTotal });
       await this.uploadLocalFile(vault, localByPath.get(item.path) ?? item);
@@ -387,6 +414,7 @@ export class SyncEngine {
         changes,
       };
       const ack = await client.requestCommit(commitReq);
+      this.beat?.();
       baseline.advance(ack.newEpoch, sentTombPaths);
       baseline.applyAckItems(ack.items);
       await baseline.save();
@@ -415,6 +443,7 @@ export class SyncEngine {
     const metas = await fs.list();
     const out: ManifestItem[] = [];
     for (const meta of metas) {
+      this.beat?.(); // 冷扫描逐文件打点：慢而活的扫描不该被看门狗掐（idle 语义）
       if (!scopeAllows(scope, meta.path, meta.isNote)) continue;
       let hash = this.hashCache.get(meta.path, meta.mtime, meta.size);
       if (hash === undefined) {
@@ -432,6 +461,27 @@ export class SyncEngine {
       });
     }
     return out;
+  }
+
+  /** 落盘后把已知的服务器哈希种进缓存（同源 SHA-256），免下一轮重读重算刚写的内容。
+   *  取不到落盘后的 mtime（适配器无 stat/文件被移走）就退回 drop——下轮重算，
+   *  只损失性能不损失正确性。 */
+  private async seedHashCache(
+    fs: LocalFSAdapter,
+    path: string,
+    hash: string,
+    byteLength: number,
+  ): Promise<void> {
+    try {
+      const st = fs.stat ? await fs.stat(path) : null;
+      if (st) {
+        this.hashCache.set(path, st.mtime, st.size ?? byteLength, hash);
+        return;
+      }
+    } catch {
+      // 落入 drop 兜底
+    }
+    this.hashCache.drop(path);
   }
 
   /** 服务器内容读取：优先本轮内联页（笔记），否则分块下载 */
